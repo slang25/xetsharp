@@ -1,0 +1,232 @@
+{
+  "offset_into_first_range": 0,
+  "terms": [
+    {
+      "hash": "3e9cecc0bbba57a239e30b9d9b9e1332ae866f7cfce32475f880d7302509bbe1",
+      "unpacked_length": 67098044,
+      "range": {
+        "start": 0,
+        "end": 1040
+      }
+    },
+    {
+      "hash": "2e6ac951ab788d7409c058591571c937770043bd0f38c51032a49e915a39f7de",
+      "unpacked_length": 67032765,
+      "range": {
+        "start": 0,
+        "end": 996
+      }
+    },
+    {
+      "hash": "2f9b43182258b06bce20af273f2167437603e6c57d73ec6b09bcb862e89b770a",
+      "unpacked_length": 66987011,
+      "range": {
+        "start": 0,
+        "end": 1056
+      }
+    },
+    {
+      "hash": "02c57c0d7bc350d7f73e6b25ddd0093586b5bb394bff28420c5296376dd6db9e",
+      "unpacked_length": 66983920,
+      "range": {
+        "start": 0,
+        "end": 996
+      }
+    },
+    {
+      "hash": "5f8d0c3e066cd7bb2aeec0576e1a400fa0f1dcd39bbe339d9397994ca651f5e5",
+      "unpacked_length": 67029993,
+      "range": {
+        "start": 0,
+        "end": 1102
+      }
+    },
+    {
+      "hash": "8e23e2ea48fcfbc760b17e4223dd0a550c977d4bd0a3f7768ba0242f124d923d",
+      "unpacked_length": 66995016,
+      "range": {
+        "start": 0,
+        "end": 1112
+      }
+    },
+    {
+      "hash": "6a7219193857a6690c76429704c960fcbe3d800019f466e664a0a6a33379bc5c",
+      "unpacked_length": 67037828,
+      "range": {
+        "start": 0,
+        "end": 1091
+      }
+    },
+    {
+      "hash": "eb1fc521ace6626fa1c47a4be261876dfb431e83b337f8eb4be1fbbf1e2426e4",
+      "unpacked_length": 67025101,
+      "range": {
+        "start": 0,
+        "end": 966
+      }
+    },
+    {
+      "hash": "37b019e779c48d1bd654788af64dc36a3a4f7e673357eb65f1b80c5490f625c6",
+      "unpacked_length": 11915493,
+      "range": {
+        "start": 0,
+        "end": 205
+      }
+    }
+  ],
+  "xorbs": {
+    "2e6ac951ab788d7409c058591571c937770043bd0f38c51032a49e915a39f7de": [
+      {
+        "url": "https://us.aws.cdn.hf.co/xorbs/default/2e6ac951ab788d7409c058591571c937770043bd0f38c51032a49e915a39f7de?repo_id=621ffdc036468d709f17434d&user_id=public&Expires=1786884238&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED",
+        "ranges": [
+          {
+            "chunks": {
+              "start": 0,
+              "end": 996
+            },
+            "bytes": {
+              "start": 0,
+              "end": 51934098
+            }
+          }
+        ]
+      }
+    ],
+    "6a7219193857a6690c76429704c960fcbe3d800019f466e664a0a6a33379bc5c": [
+      {
+        "url": "https://us.aws.cdn.hf.co/xorbs/default/6a7219193857a6690c76429704c960fcbe3d800019f466e664a0a6a33379bc5c?repo_id=621ffdc036468d709f17434d&user_id=public&Expires=1786884238&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED",
+        "ranges": [
+          {
+            "chunks": {
+              "start": 0,
+              "end": 1091
+            },
+            "bytes": {
+              "start": 0,
+              "end": 63670450
+            }
+          }
+        ]
+      }
+    ],
+    "2f9b43182258b06bce20af273f2167437603e6c57d73ec6b09bcb862e89b770a": [
+      {
+        "url": "https://us.aws.cdn.hf.co/xorbs/default/2f9b43182258b06bce20af273f2167437603e6c57d73ec6b09bcb862e89b770a?repo_id=621ffdc036468d709f17434d&user_id=public&Expires=1786884238&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED",
+        "ranges": [
+          {
+            "chunks": {
+              "start": 0,
+              "end": 1056
+            },
+            "bytes": {
+              "start": 0,
+              "end": 59738200
+            }
+          }
+        ]
+      }
+    ],
+    "eb1fc521ace6626fa1c47a4be261876dfb431e83b337f8eb4be1fbbf1e2426e4": [
+      {
+        "url": "https://us.aws.cdn.hf.co/xorbs/default/eb1fc521ace6626fa1c47a4be261876dfb431e83b337f8eb4be1fbbf1e2426e4?user_id=public&repo_id=621ffdc036468d709f17434d&Expires=1786884238&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED",
+        "ranges": [
+          {
+            "chunks": {
+              "start": 0,
+              "end": 966
+            },
+            "bytes": {
+              "start": 0,
+              "end": 47935490
+            }
+          }
+        ]
+      }
+    ],
+    "3e9cecc0bbba57a239e30b9d9b9e1332ae866f7cfce32475f880d7302509bbe1": [
+      {
+        "url": "https://us.aws.cdn.hf.co/xorbs/default/3e9cecc0bbba57a239e30b9d9b9e1332ae866f7cfce32475f880d7302509bbe1?repo_id=621ffdc036468d709f17434d&user_id=public&Expires=1786884238&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED",
+        "ranges": [
+          {
+            "chunks": {
+              "start": 0,
+              "end": 1040
+            },
+            "bytes": {
+              "start": 0,
+              "end": 56072439
+            }
+          }
+        ]
+      }
+    ],
+    "02c57c0d7bc350d7f73e6b25ddd0093586b5bb394bff28420c5296376dd6db9e": [
+      {
+        "url": "https://us.aws.cdn.hf.co/xorbs/default/02c57c0d7bc350d7f73e6b25ddd0093586b5bb394bff28420c5296376dd6db9e?user_id=public&repo_id=621ffdc036468d709f17434d&Expires=1786884238&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED",
+        "ranges": [
+          {
+            "chunks": {
+              "start": 0,
+              "end": 996
+            },
+            "bytes": {
+              "start": 0,
+              "end": 55821581
+            }
+          }
+        ]
+      }
+    ],
+    "5f8d0c3e066cd7bb2aeec0576e1a400fa0f1dcd39bbe339d9397994ca651f5e5": [
+      {
+        "url": "https://us.aws.cdn.hf.co/xorbs/default/5f8d0c3e066cd7bb2aeec0576e1a400fa0f1dcd39bbe339d9397994ca651f5e5?repo_id=621ffdc036468d709f17434d&user_id=public&Expires=1786884238&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED",
+        "ranges": [
+          {
+            "chunks": {
+              "start": 0,
+              "end": 1102
+            },
+            "bytes": {
+              "start": 0,
+              "end": 63829494
+            }
+          }
+        ]
+      }
+    ],
+    "8e23e2ea48fcfbc760b17e4223dd0a550c977d4bd0a3f7768ba0242f124d923d": [
+      {
+        "url": "https://us.aws.cdn.hf.co/xorbs/default/8e23e2ea48fcfbc760b17e4223dd0a550c977d4bd0a3f7768ba0242f124d923d?user_id=public&repo_id=621ffdc036468d709f17434d&Expires=1786884238&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED",
+        "ranges": [
+          {
+            "chunks": {
+              "start": 0,
+              "end": 1112
+            },
+            "bytes": {
+              "start": 0,
+              "end": 63641525
+            }
+          }
+        ]
+      }
+    ],
+    "37b019e779c48d1bd654788af64dc36a3a4f7e673357eb65f1b80c5490f625c6": [
+      {
+        "url": "https://us.aws.cdn.hf.co/xorbs/default/37b019e779c48d1bd654788af64dc36a3a4f7e673357eb65f1b80c5490f625c6?repo_id=621ffdc036468d709f17434d&user_id=public&Expires=1786884238&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED",
+        "ranges": [
+          {
+            "chunks": {
+              "start": 0,
+              "end": 205
+            },
+            "bytes": {
+              "start": 0,
+              "end": 11362973
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

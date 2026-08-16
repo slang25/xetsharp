@@ -109,7 +109,7 @@ Example: `https://huggingface.co/Qwen/Qwen-Image-Edit/resolve/main/transformer/d
 - Make a `GET` request to the resolve URL using standard Hub credentials/token.
 - If the file is stored on Xet, a successful response carries the **`X-Xet-Hash`** header. Its string value **is the Xet file ID** — already in string (hex) representation, usable directly in the reconstruction API path.
 - The resolve URL returns a **302 redirect**; following it downloads via the legacy LFS-compatible route. To use the Xet protocol you **MUST NOT follow the redirect** (issue the request with auto-redirect disabled; in .NET, `HttpClientHandler.AllowAutoRedirect = false`).
-- The spec page documents only `X-Xet-Hash`. *(Implementation note, not on this spec page: the Hub's resolve responses also emit `X-Xet-Cas-Url`, `X-Xet-Access-Token`, `X-Xet-Token-Expiration`, and `X-Xet-Refresh-Route` headers used by official clients as a token bootstrap/refresh path; treat as unofficial until verified against live responses.)*
+- The spec page documents only `X-Xet-Hash`. *(An earlier implementation note here guessed that the Hub also emits `X-Xet-Cas-Url` / `X-Xet-Access-Token` / `X-Xet-Token-Expiration` / `X-Xet-Refresh-Route`. Live traffic says otherwise — see [§8](#8-what-live-traffic-adds).)*
 
 ---
 
@@ -523,3 +523,87 @@ Pipeline: file → chunks → dedup → xorbs → upload xorbs → shards → up
 - Upload ordering: await all referenced xorb uploads before shard POST; split shards > 64 MiB; treat `was_inserted:false` and `result:0` as success.
 - NDJSON stream reader for `/v2/shards` with per-line JSON events and terminal-event-based success detection; fall back to `/v1/shards` on 404.
 - Retry policy: exponential backoff on 429/500/503/504 and connection errors; never retry 400/403/404/416; 401 ⇒ token refresh path.
+
+---
+
+## 8. What live traffic adds
+
+Captured 2026-08-16 against `huggingface.co` and `cas-server.xethub.hf.co`, downloading
+`xet-team/xet-spec-reference-files` and `openai-community/gpt2` while building the download
+pipeline. Sanitized copies of the responses are vendored in
+`tests/XetSharp.Tests/CapturedResponses/`. Everything below is observed behaviour, not spec text —
+it can change without the spec changing.
+
+### 8.1 Anonymous access works
+
+No `Authorization` header at all, on either the resolve endpoint or `xet-read-token`, returns a
+normal Xet read token for a public repository (`user_id=public` shows up in the signed URLs). The
+spec lists the header as required, so this is a courtesy, not a guarantee — but it means a client
+needs no credentials to download public files.
+
+### 8.2 The resolve response points at auth with `Link`, not `X-Xet-*`
+
+A resolve `302` carries `X-Xet-Hash`, `X-Linked-Size`, `X-Linked-Etag`, `X-Repo-Commit`, and:
+
+```txt
+link: <https://huggingface.co/api/datasets/{repo}/xet-read-token/{commit}>; rel="xet-auth",
+      <https://cas-server.xethub.hf.co/v1/reconstructions/{file_id}>; rel="xet-reconstruction-info"
+```
+
+There are no `X-Xet-Cas-Url` or `X-Xet-Access-Token` headers. The `rel="xet-auth"` URL is the same
+token endpoint §1 documents, already pinned to the resolved commit.
+
+Two more things the headers give away for free:
+
+- `X-Linked-Etag` is the file's **SHA-256** (quoted), so a whole-file download can be checked against
+  it as well as against its file ID.
+- `HEAD` returns exactly the same headers as `GET`. Worth preferring: a file that is *not* on Xet
+  answers a redirect-less `GET` with the file itself.
+
+### 8.3 The signed range is inside the CloudFront policy
+
+The spec's examples show the authorized range as an `X-Xet-Signed-Range=bytes%3D0-131071` query
+parameter. Current Hub traffic does not include that parameter — the constraint lives inside the
+signed `Policy` blob instead:
+
+```json
+{"Condition": {"ByteRange": {"ExpectedHeader": "bytes=0-50468"}}}
+```
+
+Same rule, less visible: the `Range` header must match that string, and a `GET` with no `Range` at
+all is **403**, not a full-object download. A client should still echo `X-Xet-Signed-Range` verbatim
+when it *is* present, and otherwise format the ranges itself as `bytes=s1-e1,s2-e2` with no spaces.
+
+*(.NET detail, verified at the socket in `RangeHeaderWireFormatTests`: `TryAddWithoutValidation`
+does put the exact string on the wire, but reading the header back through the typed API reformats
+it — a multi-range value comes back with `, ` separators. Assert on `Headers.NonValidated`.)*
+
+### 8.4 The stored xorb object is larger than the reconstruction's ranges
+
+For the reference xorb, the CDN object is 14,769,749 bytes while the reconstruction's byte range
+covering all 796 chunks ends at 14,737,812 — the object carries a trailing block past the last chunk
+record. Download never sees it, because the signed range stops at the chunk data. This is consistent
+with the four trailing `XETB` bytes the reference `.xorb` artefact ends with: a xorb reader must stop
+at the last complete chunk record rather than assume the data ends on one.
+
+### 8.5 The v1 `fetch_info` entry shape
+
+The spec names `CASReconstructionFetchInfo` without giving its fields. Live `/v1/reconstructions`:
+
+```json
+"fetch_info": {
+  "<xorb hash>": [
+    { "range": { "start": 0, "end": 2 }, "url": "https://…", "url_range": { "start": 0, "end": 50468 } }
+  ]
+}
+```
+
+`range` is the chunk range (end-exclusive) and `url_range` the byte range (end-inclusive) — the same
+pair v2 nests under `ranges[].chunks` / `ranges[].bytes`, one per URL instead of many. Both versions
+were served for the same file at the time of capture, and parse to identical reconstructions.
+
+### 8.6 Reconstruction responses are gzipped only if asked
+
+`--compressed` (i.e. `Accept-Encoding: gzip`) gets `content-encoding: gzip`; the response is
+otherwise plain JSON. For a 796-chunk file the body is under 1 KB, but a multi-gigabyte file's
+reconstruction is worth compressing, as the spec advises.

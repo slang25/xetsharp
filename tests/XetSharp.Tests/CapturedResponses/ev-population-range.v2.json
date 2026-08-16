@@ -1,0 +1,32 @@
+{
+  "offset_into_first_range": 0,
+  "terms": [
+    {
+      "hash": "eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632",
+      "unpacked_length": 237171,
+      "range": {
+        "start": 0,
+        "end": 2
+      }
+    }
+  ],
+  "xorbs": {
+    "eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632": [
+      {
+        "url": "https://us.aws.cdn.hf.co/xorbs/default/eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632?user_id=public&repo_id=68cb1d571350e17be1c74fda&Expires=1786883964&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED",
+        "ranges": [
+          {
+            "chunks": {
+              "start": 0,
+              "end": 2
+            },
+            "bytes": {
+              "start": 0,
+              "end": 50468
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

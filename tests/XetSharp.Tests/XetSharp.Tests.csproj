@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <Content Include="ReferenceFiles/*" Exclude="ReferenceFiles/README.md" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="CapturedResponses/*" Exclude="CapturedResponses/README.md" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

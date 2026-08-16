@@ -13,4 +13,8 @@
     <ProjectReference Include="../../src/XetSharp/XetSharp.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="ReferenceFiles/*" Exclude="ReferenceFiles/README.md" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

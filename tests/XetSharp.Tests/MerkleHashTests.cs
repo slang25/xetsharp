@@ -19,7 +19,7 @@ public class MerkleHashTests
 
         var hash = new MerkleHash(bytes);
 
-        await Assert.That(hash.ToByteArray()).IsEquivalentTo(bytes);
+        await Assert.That(hash.ToByteArray()).IsEquivalentTo(bytes, CollectionOrdering.Matching);
     }
 
     [Test]

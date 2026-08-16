@@ -13,6 +13,12 @@ namespace XetSharp.Shards;
 /// </summary>
 public sealed record MdbShard
 {
+    /// <summary>
+    /// The largest serialized shard the CAS service accepts as an upload body. An upload describing
+    /// more than this has to be split across several shards.
+    /// </summary>
+    public const int MaxUploadSize = 64 * 1024 * 1024;
+
     /// <summary>File reconstructions. Empty in a global-deduplication response.</summary>
     public required IReadOnlyList<ShardFileInfo> Files { get; init; }
 

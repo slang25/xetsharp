@@ -38,7 +38,33 @@ using var destination = new MemoryStream();
 await client.DownloadRangeAsync(repository, "model.safetensors", destination, offset: 1_000_000, length: 250_000);
 ```
 
-Uploading is not implemented yet — see [PLAN.md](PLAN.md).
+## Uploading a file
+
+```csharp
+using var client = new XetClient(); // needs a Hub token with write access to the repository
+
+var result = await client.UploadAndCommitAsync(
+    XetRepository.Model("you/your-model"),
+    [XetUploadFile.FromFile("model.safetensors")],
+    summary: "Add the weights");
+
+Console.WriteLine($"{result.Files[0].FileId} in {result.XorbCount} xorbs, " +
+                  $"{result.DeduplicatedBytes} bytes already stored");
+```
+
+The file is chunked, deduplicated against what this upload has already seen and against the CAS
+service's global index, packed into xorbs and registered with a shard — and then committed as an
+LFS pointer, which is what makes a Git-backed repository show it. Storing the bytes and committing
+them are separate steps, so `UploadAsync` and `CommitAsync` are available on their own.
+
+Uploading several files at once packs their chunks together and publishes them in one commit:
+
+```csharp
+await client.UploadAndCommitAsync(
+    repository,
+    [XetUploadFile.FromFile("model.safetensors"), XetUploadFile.FromFile("tokenizer.json")],
+    summary: "Add the model");
+```
 
 ## Layout
 
@@ -68,4 +94,11 @@ opt-in too:
 
 ```sh
 XETSHARP_LIVE_TESTS=1 dotnet run --project tests/XetSharp.Tests
+```
+
+The live *upload* tests write to a real repository, so they need one you are happy to have scribbled
+on and a Hub token with write access to it. They clean up after themselves:
+
+```sh
+XETSHARP_LIVE_UPLOAD_REPO=you/xetsharp-scratch dotnet run --project tests/XetSharp.Tests
 ```

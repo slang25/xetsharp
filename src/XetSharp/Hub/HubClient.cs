@@ -128,6 +128,56 @@ public sealed class HubClient
             GetHeader(response, "X-Repo-Commit"));
     }
 
+    /// <summary>
+    /// Commits LFS pointers for files whose contents are already stored, which is what makes an
+    /// upload visible in a Git-backed repository. Needs a Hub token with write access.
+    /// </summary>
+    /// <remarks>
+    /// This is the Hub's own commit API rather than part of the Xet protocol: Xet stores the bytes
+    /// and registers the file, and the repository's Git history still has to be told about it.
+    /// Storage-bucket repositories need no commit at all.
+    /// </remarks>
+    public async Task<XetCommit> CommitAsync(
+        XetRepository repository,
+        XetCommitRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Summary);
+        repository.Validate();
+
+        if (request.Files.Count == 0 && request.DeletedFiles.Count == 0)
+        {
+            throw new ArgumentException("A commit must add or delete at least one file.", nameof(request));
+        }
+
+        var uri = new Uri(
+            _hubUrl,
+            $"/api/{repository.ApiSegment}/{repository.Id}/commit/{repository.EncodedRevision}" +
+            (request.CreatePullRequest ? "?create_pr=1" : string.Empty));
+
+        using var message = new HttpRequestMessage(HttpMethod.Post, uri)
+        {
+            Content = new ByteArrayContent(CommitPayload.Build(request))
+            {
+                Headers = { ContentType = new MediaTypeHeaderValue("application/x-ndjson") },
+            },
+        };
+
+        AddAuthorization(message);
+        using var response = await _httpClient.SendAsync(message, cancellationToken).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, uri, "commit to the repository", cancellationToken).ConfigureAwait(false);
+
+        var payload = await response.Content
+            .ReadFromJsonAsync(XetJsonContext.Default.CommitResponseJson, cancellationToken)
+            .ConfigureAwait(false);
+
+        return new XetCommit(payload?.CommitOid, ToUri(payload?.CommitUrl), ToUri(payload?.PullRequestUrl));
+    }
+
+    private static Uri? ToUri(string? url) => Uri.TryCreate(url, UriKind.Absolute, out var parsed) ? parsed : null;
+
     internal Uri ResolveUri(XetRepository repository, string path)
     {
         var encodedPath = string.Join('/', path.Split('/').Select(Uri.EscapeDataString));

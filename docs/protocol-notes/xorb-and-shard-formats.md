@@ -38,6 +38,14 @@ A **xorb** ("Xet Orb") is a serialized sequence of chunks: repeated `[chunk head
 - Max raw (uncompressed) chunk size: **128 KiB** (needs 18 bits; fits in the 3-byte size field).
 - RECOMMENDED: pack chunks from multiple files into one xorb when size allows.
 
+> **"Near 64 MiB uncompressed" is not the same as "under 64 MiB serialized".** A chunk that fails to
+> compress is stored as-is, so the serialized xorb is the raw bytes *plus 8 bytes of header per
+> chunk*. Packing to exactly 64 MiB of raw data therefore overshoots the limit on incompressible
+> input. XetSharp caps the raw total at 64 MiB minus one header per chunk at its 8192-chunk cap,
+> which makes an over-limit xorb impossible to build rather than something to discover after
+> compressing the chunk that broke it. (The reference xorb is 63.5 MB of CSV in 14.7 MB serialized,
+> so the difference only bites on data that does not compress.)
+
 ### 1.2 Chunk header — 8 bytes
 
 | Offset | Size | Field | Notes |

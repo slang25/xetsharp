@@ -23,3 +23,11 @@ Requires the .NET 10 SDK.
 dotnet build
 dotnet run --project tests/XetSharp.Tests
 ```
+
+A handful of tests need reference artefacts too large to vendor (a 63 MB CSV and the 14 MB xorb
+built from it). They skip unless you point at a local copy of the dataset:
+
+```sh
+hf download xet-team/xet-spec-reference-files --repo-type dataset --local-dir /tmp/xet-reference
+XETSHARP_REFERENCE_DIR=/tmp/xet-reference dotnet run --project tests/XetSharp.Tests
+```

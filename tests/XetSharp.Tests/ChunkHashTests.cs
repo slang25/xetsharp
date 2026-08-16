@@ -59,7 +59,7 @@ public class ChunkHashTests
             .Select(chunk => XetHashes.ChunkHash(chunk))
             .ToArray();
 
-        await Assert.That(chunkHashes.Select(h => h.ToString()).ToArray()).IsEquivalentTo(ExpectedChunkHashes);
+        await Assert.That(chunkHashes.Select(h => h.ToString()).ToArray()).IsEquivalentTo(ExpectedChunkHashes, CollectionOrdering.Matching);
 
         var rangeHash = XetHashes.VerificationHash(chunkHashes);
         await Assert.That(rangeHash.ToString())

@@ -32,6 +32,32 @@ public readonly struct MerkleHash : IEquatable<MerkleHash>, ISpanFormattable
         _d = BinaryPrimitives.ReadUInt64LittleEndian(bytes[24..]);
     }
 
+    /// <summary>
+    /// Creates a hash from bytes that read in the same order as its canonical hex string — the
+    /// reverse, within each 8-byte group, of the primary constructor. Equivalent to
+    /// <see cref="Parse"/> over the hex encoding of <paramref name="bytes"/>.
+    /// </summary>
+    /// <remarks>
+    /// Xet's own hashes are not produced in this order, so this is the wrong constructor for a
+    /// BLAKE3 digest. It exists for foreign hashes that are: a shard's file-metadata SHA-256 is
+    /// stored this way, because the reference implementation gets it as a hex string and parses it.
+    /// </remarks>
+    public static MerkleHash FromHexOrder(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.Length != Size)
+        {
+            throw new ArgumentException($"A {nameof(MerkleHash)} requires exactly {Size} bytes, got {bytes.Length}.", nameof(bytes));
+        }
+
+        Span<byte> reversed = stackalloc byte[Size];
+        for (var i = 0; i < 4; i++)
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(reversed[(i * 8)..], BinaryPrimitives.ReadUInt64BigEndian(bytes[(i * 8)..]));
+        }
+
+        return new MerkleHash(reversed);
+    }
+
     public static MerkleHash Zero => default;
 
     public void CopyTo(Span<byte> destination)
@@ -40,6 +66,15 @@ public readonly struct MerkleHash : IEquatable<MerkleHash>, ISpanFormattable
         BinaryPrimitives.WriteUInt64LittleEndian(destination[8..], _b);
         BinaryPrimitives.WriteUInt64LittleEndian(destination[16..], _c);
         BinaryPrimitives.WriteUInt64LittleEndian(destination[24..], _d);
+    }
+
+    /// <summary>Writes the bytes in canonical hex-string order; the inverse of <see cref="FromHexOrder"/>.</summary>
+    public void CopyToHexOrder(Span<byte> destination)
+    {
+        BinaryPrimitives.WriteUInt64BigEndian(destination, _a);
+        BinaryPrimitives.WriteUInt64BigEndian(destination[8..], _b);
+        BinaryPrimitives.WriteUInt64BigEndian(destination[16..], _c);
+        BinaryPrimitives.WriteUInt64BigEndian(destination[24..], _d);
     }
 
     public byte[] ToByteArray()

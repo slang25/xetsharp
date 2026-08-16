@@ -24,7 +24,7 @@ public class ChunkerTests
         [
             84493, 134421, 144853, 243318, 271793, 336457, 467529, 494581, 582000, 596735, 616815, 653164, 678202,
             724510, 815591, 827760, 958832, 991092, 1000000,
-        ]);
+        ], CollectionOrdering.Matching);
     }
 
     [Test]
@@ -36,7 +36,7 @@ public class ChunkerTests
         var boundaries = TestData.Boundaries(Chunker.ChunkAll(data));
 
         await Assert.That(boundaries).IsEquivalentTo(
-            [131072, 262144, 393216, 524288, 655360, 786432, 917504, 1_000_000]);
+            [131072, 262144, 393216, 524288, 655360, 786432, 917504, 1_000_000], CollectionOrdering.Matching);
     }
 
     [Test]
@@ -56,8 +56,8 @@ public class ChunkerTests
             chunker.NextBlock(data.AsSpan(position, end - position), isFinal: end == data.Length, chunks);
         }
 
-        await Assert.That(TestData.Boundaries(chunks)).IsEquivalentTo(reference);
-        await Assert.That(chunks.SelectMany(c => c).ToArray()).IsEquivalentTo(data);
+        await Assert.That(TestData.Boundaries(chunks)).IsEquivalentTo(reference, CollectionOrdering.Matching);
+        await Assert.That(chunks.SelectMany(c => c).ToArray()).IsEquivalentTo(data, CollectionOrdering.Matching);
     }
 
     [Test]
@@ -68,7 +68,7 @@ public class ChunkerTests
         var chunks = Chunker.ChunkAll(data);
 
         await Assert.That(chunks).Count().IsEqualTo(1);
-        await Assert.That(chunks[0]).IsEquivalentTo(data);
+        await Assert.That(chunks[0]).IsEquivalentTo(data, CollectionOrdering.Matching);
     }
 
     [Test]
@@ -87,6 +87,6 @@ public class ChunkerTests
 
         var boundaries = TestData.Boundaries(Chunker.ChunkAll(data));
 
-        await Assert.That(boundaries).IsEquivalentTo(testCase.Boundaries);
+        await Assert.That(boundaries).IsEquivalentTo(testCase.Boundaries, CollectionOrdering.Matching);
     }
 }

@@ -62,10 +62,16 @@ Immediately after the header: exactly `compressed_size` bytes of chunk data.
 | Value | Name | Description |
 |-------|------|-------------|
 | `0` | `None` | Data stored as-is (`compressed_size == uncompressed_size`) |
-| `1` | `LZ4` | Standard LZ4 **block** compression |
-| `2` | `ByteGrouping4LZ4` (BG4) | Byte grouping with 4-byte groups, then LZ4. Optimized for float/structured data |
+| `1` | `LZ4` | LZ4 **frame** format — see the note below |
+| `2` | `ByteGrouping4LZ4` (BG4) | Byte grouping with 4-byte groups, then LZ4 (also framed) |
 
 If compression makes the chunk *larger*, the chunk SHOULD be stored uncompressed (scheme 0); uncompressed size max is still 128 KiB.
+
+> **Verified against the reference xorb, 2026-08-16.** The spec says only "standard LZ4 compression",
+> which reads like the bare LZ4 block format. It is not: every chunk payload in
+> `eea25d6e….xorb` begins with the LZ4 frame magic `04 22 4d 18`, with `FLG = 0x60` (independent
+> blocks, no checksums) and `BD = 0x50` (256 KiB max block). Decoding as a block yields garbage.
+> In .NET that means `K4os.Compression.LZ4.Streams.LZ4Frame`, not `LZ4Codec.Decode`.
 
 #### BG4 transform (scheme 2)
 
@@ -93,7 +99,12 @@ for chunk in xorb.chunks:
 ### 1.5 Chunk addressing
 
 - Chunks indexed 0-based within their xorb; addressed by index, usually in ranges `[start, end)`.
-- Reference sample xorb: dataset `xet-team/xet-spec-reference-files`, file `eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632.xorb` (hash = filename).
+- Reference sample xorb: dataset `xet-team/xet-spec-reference-files`, file `eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632.xorb` (hash = filename). 14,737,817 bytes, 796 chunks, all scheme 1.
+
+> **Undocumented trailing bytes.** That reference xorb's last complete chunk record ends at offset
+> 14,737,813; the remaining four bytes are the ASCII `XETB`. Nothing in the spec describes a xorb
+> footer. A reader must therefore stop at the end of the last *complete* record rather than assume
+> the data ends exactly on a record boundary — and must not treat a short remainder as corruption.
 
 ---
 
@@ -195,8 +206,15 @@ Rules: nth verification entry ↔ nth data-sequence entry; there are exactly `nu
 
 | Offset | Size | Field | Notes |
 |--------|------|-------|-------|
-| 0 | 32 | `sha256` | SHA256 of the full file contents |
+| 0 | 32 | `sha256` | SHA256 of the full file contents — **stored in hash string order**, see note |
 | 32 | 16 | `_unused` | Reserved, zero |
+
+> **The SHA256 is byte-swapped like every other hash.** The reference shard for
+> `Electric_Vehicle_Population_Data_20250917.csv` stores `1276f752b25512f4…`, while the file's actual
+> SHA256 digest is `f41255b252f77612…` — each 8-byte group reversed. The reference implementation
+> gets the digest as a hex string and parses it into the same 32-byte hash type it uses everywhere,
+> so §3.5's hash↔hex rule applies here too. Writing raw digest bytes straight into the field would
+> produce an invalid shard.
 
 At most one per file block, always last in the block. **REQUIRED when uploading to Git-based HF Hub repos** (models/datasets/Spaces — LFS pointers reference the SHA256); OPTIONAL for Storage Buckets. If omitted, `WITH_METADATA_EXT` flag MUST NOT be set.
 
@@ -235,9 +253,15 @@ Sequence of **CAS Info blocks** (one per xorb), terminated by the same style of 
 | Offset | Size | Field | Notes |
 |--------|------|-------|-------|
 | 0 | 32 | `chunk_hash` | Chunk hash (possibly HMAC-transformed — see footer) |
-| 32 | 4 | `chunk_byte_range_start` (u32) | Start position of this chunk in the serialized CAS block |
+| 32 | 4 | `chunk_byte_range_start` (u32) | "Start position in CAS block" — see note |
 | 36 | 4 | `unpacked_segment_bytes` (u32) | Chunk size when unpacked |
 | 40 | 8 | `_unused` | Reserved, zero |
+
+> **What `chunk_byte_range_start` actually holds.** In all three published reference shards it is the
+> running sum of `unpacked_segment_bytes` — the chunk's offset in the *uncompressed* stream, ending
+> at `num_bytes_in_cas` — not its offset in the serialized xorb. (Those shards also carry
+> `num_bytes_on_disk = 0`, so they describe a xorb that had not been serialized when they were
+> written; treat the field as uncompressed offsets unless a counter-example turns up.)
 
 Deserialization: seek `footer.cas_info_offset` → read header → bookend check (all-`0xFF` hash) → read `num_entries` entries → repeat.
 
@@ -250,14 +274,29 @@ Deserialization: seek `footer.cas_info_offset` → read header → bookend check
 | 0 | 8 | `version` (u64) | Must be **1** |
 | 8 | 8 | `file_info_offset` (u64) | Offset of File Info section |
 | 16 | 8 | `cas_info_offset` (u64) | Offset of CAS Info section |
-| 24 | 48 | `_buffer` | Reserved |
+| 24 | 48 | `_buffer` | Reserved *per the spec* — but not zero in practice, see below |
 | 72 | 32 | `chunk_hash_hmac_key` (Hash) | HMAC key for chunk hashes; zero = no HMAC |
 | 104 | 8 | `shard_creation_timestamp` (u64) | Seconds since Unix epoch |
 | 112 | 8 | `shard_key_expiry` (u64) | Seconds since Unix epoch |
-| 120 | 72 | `_buffer2` | Reserved |
+| 120 | 72 | `_buffer2` | Reserved *per the spec* — but not zero in practice, see below |
 | 192 | 8 | `footer_offset` (u64) | Offset where the footer itself starts |
 
 Read: seek `file_size − footer_size` (footer_size from header), read fields sequentially, verify version == 1.
+
+> **Both "reserved" regions carry real fields.** Every reference shard has non-zero bytes inside
+> them, matching `xet-core`'s own `MDBShardFileFooter`:
+>
+> | Offset | Field | Observed value |
+> |---|---|---|
+> | 24 / 40 / 56 | `file_lookup_offset`, `cas_lookup_offset`, `chunk_lookup_offset` (u64) | all equal `footer_offset` — the lookup tables are empty |
+> | 32 / 48 / 64 | matching `*_num_entry` (u64) | all `0` |
+> | 168 | `stored_bytes_on_disk` (u64) | `0` in all three (their xorb was not serialized) |
+> | 176 | `materialized_bytes` (u64) | total unpacked bytes of the files — `0` in the dedupe shard, which has none |
+> | 184 | `stored_bytes` (u64) | total unpacked bytes of the CAS-info chunks |
+>
+> Zeroing these on write would break byte-identical round-trips, so preserve them. The lookup tables
+> would sit between the CAS-info bookend and the footer; a shard that has them can be detected by
+> the sections not ending exactly `footer_size` bytes from EOF.
 
 #### HMAC key protection (global dedupe responses)
 
@@ -407,13 +446,13 @@ Example: bytes `[0,1,...,31]` → reordered `[7,6,5,4,3,2,1,0, 15,...,8, 23,...,
 ## 4. C# Implementation Checklist
 
 **Parsing (download):**
-- 8-byte chunk header reader: `version(1) | compressed_size(3 LE) | type(1) | uncompressed_size(3 LE)`; dispatch on type 0/1/2; enforce 128 KiB max; LZ4 *block* decode (e.g. K4os.Compression.LZ4 `LZ4Codec.Decode`); BG4 un-grouping with remainder handling.
+- 8-byte chunk header reader: `version(1) | compressed_size(3 LE) | type(1) | uncompressed_size(3 LE)`; dispatch on type 0/1/2; enforce 128 KiB max; LZ4 *frame* decode (`K4os.Compression.LZ4.Streams.LZ4Frame.Decode`); BG4 un-grouping with remainder handling; stop at a trailing remainder shorter than a header.
 - Shard reader: 48-byte header (magic + version 2 + footer_size), 48-byte fixed records throughout, all-0xFF-hash bookends, flag-driven optional sections, 200-byte footer (version 1), HMAC-keyed chunk-hash matching for dedupe shards.
 - Reconstruction client: v2 JSON (snake_case; note `/v2/file-chunk-hashes` is camelCase), multi-range GET with exact signed `Range` header, `multipart/byteranges` parsing, `unpacked_length` validation, `offset_into_first_range` skip, tail truncation for ranged requests.
 
 **Serializing (upload):**
 - Xorb writer: per-chunk compression choice, ≤ 64 MiB serialized cap, mixed schemes OK.
-- Shard writer: header with `footer_size = 0`, File Info blocks with verification entries (required) + SHA256 metadata ext (required for Hub git repos, flag `1<<30`; verification flag `1<<31`), CAS Info blocks for every new xorb (`num_bytes_in_cas` = raw bytes, `num_bytes_on_disk` = serialized xorb length), both bookends, **no footer** in upload body.
+- Shard writer: header with `footer_size = 0`, File Info blocks with verification entries (required) + SHA256 metadata ext (required for Hub git repos, flag `1<<30`; verification flag `1<<31`), CAS Info blocks for every new xorb (`num_bytes_in_cas` = raw bytes, `num_bytes_on_disk` = serialized xorb length), both bookends, **no footer** in upload body. When a footer *is* written, preserve the fields hiding in the two "reserved" regions.
 - Hash-to-hex: 8-byte-group-reversed little-endian rendering for every string-form hash.
 - Everything little-endian; ranges `[start, end)` in chunk space, inclusive ends in HTTP `Range`.
 

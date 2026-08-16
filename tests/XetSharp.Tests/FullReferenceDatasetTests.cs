@@ -1,5 +1,8 @@
 using XetSharp.Chunking;
 using XetSharp.Hashing;
+using XetSharp.Hub;
+using XetSharp.Shards;
+using XetSharp.Upload;
 using XetSharp.Xorbs;
 
 namespace XetSharp.Tests;
@@ -55,5 +58,81 @@ public class FullReferenceDatasetTests
 
         await Assert.That(XetHashes.XorbHash(chunkHashes).ToString()).IsEqualTo(ReferenceFiles.XorbHash);
         await Assert.That(XetHashes.FileHash(chunkHashes).ToString()).IsEqualTo(ReferenceFiles.FileHash);
+    }
+
+    /// <summary>
+    /// The upload path's cross-implementation check, and the strongest one in the suite: running the
+    /// real 63 MB file through chunking, packing and shard building has to produce the very shard
+    /// the reference implementation uploaded for it — byte for byte, once the one field it could not
+    /// know is accounted for.
+    /// </summary>
+    /// <remarks>
+    /// The published shard records <c>num_bytes_on_disk = 0</c>: it describes a xorb that had not
+    /// been serialized when the shard was written. Ours records what we actually uploaded, so the
+    /// comparison zeroes it — and then asserts separately that it is the length of the xorb the
+    /// service received.
+    /// </remarks>
+    [Test]
+    [SkipWithoutReferenceDataset]
+    public async Task Builds_the_shard_the_reference_implementation_uploaded()
+    {
+        var cas = new FakeCas();
+        using var client = new XetClient(new XetClientOptions
+        {
+            HubUrl = new Uri("https://hub.invalid"),
+            UseAmbientCredentials = false,
+            HttpClient = new HttpClient(new FakeHttpHandler(cas.Handler)),
+        });
+
+        var result = await client.UploadAsync(
+            XetRepository.Dataset("xet-team/xet-spec-reference-files"),
+            [XetUploadFile.FromFile(SkipWithoutReferenceDatasetAttribute.PathTo(CsvFileName), "reference.csv")]);
+
+        await Assert.That(result.Files.Single().FileId.ToString()).IsEqualTo(ReferenceFiles.FileHash);
+        await Assert.That(result.Files.Single().Sha256).IsEqualTo(ReferenceFiles.Sha256);
+        await Assert.That(result.XorbCount).IsEqualTo(1);
+
+        var built = cas.Shards.Single();
+        await Assert.That(built.Xorbs.Single().SerializedLength).IsEqualTo((uint)cas.Xorbs.Values.Single().Length);
+
+        var comparable = built with { Xorbs = [built.Xorbs.Single() with { SerializedLength = 0 }] };
+        await Assert.That(comparable.ToByteArray())
+            .IsEquivalentTo(ReferenceFiles.Read("ev-population.csv.shard.verification-no-footer"), CollectionOrdering.Matching);
+
+    }
+
+    /// <summary>
+    /// The xorb the upload produced holds the reference file's chunks, in order, undamaged — but is
+    /// not the reference implementation's bytes. Nothing requires it to be: a xorb is addressed by
+    /// the hash of its chunks, which the shard comparison above already pins, and the compression
+    /// scheme is the writer's to pick per chunk. Choosing the smallest of the three rather than
+    /// always LZ4 makes this xorb about 70 KB smaller than the published one.
+    /// </summary>
+    [Test]
+    [SkipWithoutReferenceDataset]
+    public async Task Packs_the_reference_file_into_a_xorb_that_decodes_to_its_chunks()
+    {
+        var cas = new FakeCas();
+        using var client = new XetClient(new XetClientOptions
+        {
+            HubUrl = new Uri("https://hub.invalid"),
+            UseAmbientCredentials = false,
+            HttpClient = new HttpClient(new FakeHttpHandler(cas.Handler)),
+        });
+
+        await client.UploadAsync(
+            XetRepository.Dataset("xet-team/xet-spec-reference-files"),
+            [XetUploadFile.FromFile(SkipWithoutReferenceDatasetAttribute.PathTo(CsvFileName), "reference.csv")]);
+
+        var packed = cas.Xorbs.Values.Single();
+        var chunks = XorbSerializer.Deserialize(packed);
+
+        await Assert.That(chunks.Count).IsEqualTo(ReferenceFiles.Chunks.Length);
+        for (var i = 0; i < chunks.Count; i++)
+        {
+            await Assert.That((XetHashes.ChunkHash(chunks[i]), (ulong)chunks[i].Length)).IsEqualTo(ReferenceFiles.Chunks[i]);
+        }
+
+        await Assert.That(packed.Length).IsLessThan(SkipWithoutReferenceDatasetAttribute.Read(XorbFileName).Length);
     }
 }

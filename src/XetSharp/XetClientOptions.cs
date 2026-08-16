@@ -1,5 +1,6 @@
 using XetSharp.Download;
 using XetSharp.Hub;
+using XetSharp.Upload;
 
 namespace XetSharp;
 
@@ -20,6 +21,8 @@ public sealed record XetClientOptions
     public bool UseAmbientCredentials { get; init; } = true;
 
     public XetDownloadOptions Download { get; init; } = XetDownloadOptions.Default;
+
+    public XetUploadOptions Upload { get; init; } = XetUploadOptions.Default;
 
     /// <summary>
     /// An HttpClient to use instead of the one the client builds for itself — the hook for

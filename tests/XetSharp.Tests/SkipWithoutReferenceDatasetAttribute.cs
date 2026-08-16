@@ -19,8 +19,10 @@ public sealed class SkipWithoutReferenceDatasetAttribute()
         }
     }
 
-    public static byte[] Read(string name) =>
-        File.ReadAllBytes(Path.Combine(Directory ?? throw new InvalidOperationException("Reference dataset is unavailable."), name));
+    public static byte[] Read(string name) => File.ReadAllBytes(PathTo(name));
+
+    public static string PathTo(string name) =>
+        Path.Combine(Directory ?? throw new InvalidOperationException("Reference dataset is unavailable."), name);
 
     public override Task<bool> ShouldSkip(TestRegisteredContext context) => Task.FromResult(Directory is null);
 }

@@ -5,11 +5,12 @@ using XetSharp.Cas;
 using XetSharp.Download;
 using XetSharp.Http;
 using XetSharp.Hub;
+using XetSharp.Upload;
 
 namespace XetSharp;
 
 /// <summary>
-/// Downloads files stored on the Hugging Face Hub over the Xet protocol.
+/// Downloads and uploads files stored on the Hugging Face Hub over the Xet protocol.
 /// </summary>
 /// <example>
 /// <code>
@@ -30,11 +31,16 @@ public sealed class XetClient : IDisposable
     private readonly CasClient _cas;
     private readonly ReconstructionWriter _writer;
     private readonly XetDownloadOptions _downloadOptions;
+    private readonly XetUploadOptions _uploadOptions;
+    private readonly TimeProvider _timeProvider;
 
     public XetClient(XetClientOptions? options = null)
     {
         options ??= new XetClientOptions();
         _downloadOptions = options.Download;
+        _uploadOptions = options.Upload;
+        _uploadOptions.Validate();
+        _timeProvider = options.TimeProvider ?? TimeProvider.System;
         _ownsHttpClient = options.HttpClient is null;
         _httpClient = options.HttpClient ?? CreateHttpClient(options);
 
@@ -188,6 +194,77 @@ public sealed class XetClient : IDisposable
             isWholeFile && _downloadOptions.VerifySha256 ? file.Sha256 : null,
             cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Uploads files over the Xet protocol: chunk, deduplicate against what already exists, pack the
+    /// rest into xorbs, and register the result. The bytes are stored and addressable afterwards, but
+    /// a Git-backed repository does not show them until they are committed — see
+    /// <see cref="UploadAndCommitAsync"/>.
+    /// </summary>
+    /// <remarks>Needs a Hub token with write access to the repository and revision.</remarks>
+    public Task<XetUploadResult> UploadAsync(
+        XetRepository repository,
+        IReadOnlyList<XetUploadFile> files,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        ArgumentNullException.ThrowIfNull(files);
+        repository.Validate();
+
+        if (files.Count == 0)
+        {
+            throw new ArgumentException("There are no files to upload.", nameof(files));
+        }
+
+        var duplicate = files.GroupBy(file => file.Path, StringComparer.Ordinal).FirstOrDefault(group => group.Count() > 1);
+        if (duplicate is not null)
+        {
+            throw new ArgumentException($"'{duplicate.Key}' is listed more than once.", nameof(files));
+        }
+
+        return new UploadSession(_cas, repository, _uploadOptions, _timeProvider).RunAsync(files, cancellationToken);
+    }
+
+    /// <summary>Uploads a single local file.</summary>
+    public Task<XetUploadResult> UploadFileAsync(
+        XetRepository repository,
+        string localPath,
+        string? pathInRepository = null,
+        CancellationToken cancellationToken = default) =>
+        UploadAsync(repository, [XetUploadFile.FromFile(localPath, pathInRepository)], cancellationToken);
+
+    /// <summary>
+    /// Uploads files and then commits LFS pointers to them, which is what a Git-backed repository
+    /// needs before the files appear in it.
+    /// </summary>
+    public async Task<XetUploadResult> UploadAndCommitAsync(
+        XetRepository repository,
+        IReadOnlyList<XetUploadFile> files,
+        string summary,
+        string? description = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await UploadAsync(repository, files, cancellationToken).ConfigureAwait(false);
+        var commit = await CommitAsync(
+            repository,
+            new XetCommitRequest
+            {
+                Summary = summary,
+                Description = description,
+                Files = [.. result.Files.Select(file => new XetCommitFile(file.Path, file.Sha256, file.Size))],
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        return result with { Commit = commit };
+    }
+
+    /// <summary>
+    /// Commits pointers to files whose contents are already stored. Uploading and committing are
+    /// separate steps because storing the bytes is the Xet protocol's job and recording them in the
+    /// repository's history is the Hub's.
+    /// </summary>
+    public Task<XetCommit> CommitAsync(XetRepository repository, XetCommitRequest request, CancellationToken cancellationToken = default) =>
+        _hub.CommitAsync(repository, request, cancellationToken);
 
     public void Dispose()
     {

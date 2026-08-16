@@ -607,3 +607,45 @@ were served for the same file at the time of capture, and parse to identical rec
 `--compressed` (i.e. `Accept-Encoding: gzip`) gets `content-encoding: gzip`; the response is
 otherwise plain JSON. For a 796-chunk file the body is under 1 KB, but a multi-gigabyte file's
 reconstruction is worth compressing, as the spec advises.
+
+---
+
+## 9. Publishing an upload: the Hub commit API
+
+**Not part of the Xet specification, and not verified against a live repository.** The upload pages
+end at "the user must then commit a git LFS pointer file containing the file's SHA256" without saying
+how. What follows is the shape the official `huggingface_hub` client sends, recorded here because
+XetSharp implements it (`HubClient.CommitAsync`) and because it is the one part of the upload path
+with no offline oracle behind it. Treat it as a working hypothesis until a live run confirms it.
+
+```txt
+POST https://huggingface.co/api/{repo_type}s/{repo_id}/commit/{revision}[?create_pr=1]
+Authorization: Bearer <HF Hub token with write access>
+Content-Type: application/x-ndjson
+```
+
+Body: one JSON object per line, each an envelope of `{ "key": ..., "value": { ... } }`. A header
+line first, then one line per change.
+
+```json
+{"key":"header","value":{"summary":"Add the weights","description":"","parentCommit":"<oid>"}}
+{"key":"lfsFile","value":{"path":"model.safetensors","algo":"sha256","oid":"<hex sha256>","size":548105171}}
+{"key":"deletedFile","value":{"path":"old.bin"}}
+```
+
+- `parentCommit` is optional; when present the Hub rejects the commit if the branch has moved on.
+- `lfsFile` references content that must already be stored — for Xet, that means the shard registering
+  the file has been uploaded. The `oid` is the file's plain SHA-256 hex, *not* the byte-swapped form
+  the shard's `FileMetadataExt` record stores.
+- There is also a `file` key (with inline base64 `content`) for ordinary small files, which XetSharp
+  does not use: anything worth sending over Xet is too big for it.
+- Response: JSON with `commitOid`, `commitUrl`, and `pullRequestUrl` when `create_pr=1` was passed.
+
+### `preupload`, and why this client skips it
+
+The official client first posts to `/api/{repo_type}s/{repo_id}/preupload/{revision}` with each
+file's path, size and a base64 sample of its first bytes, and is told back an `uploadMode`
+(`lfs` or `regular`) and a `shouldIgnore` flag — i.e. whether the file should go through LFS/Xet at
+all. XetSharp does not call it: it would be a second endpoint taken from a client rather than a
+spec, and the commit above does not document a dependency on it. If a live commit turns out to need
+the preupload call first, this is the first place to look.

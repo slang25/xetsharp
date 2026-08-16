@@ -10,5 +10,9 @@ namespace XetSharp.Json;
 /// </summary>
 [JsonSourceGenerationOptions(GenerationMode = JsonSourceGenerationMode.Metadata)]
 [JsonSerializable(typeof(XetTokenJson))]
+[JsonSerializable(typeof(CommitResponseJson))]
 [JsonSerializable(typeof(ReconstructionJson))]
+[JsonSerializable(typeof(UploadXorbResponseJson))]
+[JsonSerializable(typeof(UploadShardResponseJson))]
+[JsonSerializable(typeof(ShardUploadEventJson))]
 internal sealed partial class XetJsonContext : JsonSerializerContext;

@@ -1,3 +1,5 @@
+using XetSharp.Chunking;
+using XetSharp.Hashing;
 using XetSharp.Hub;
 using XetSharp.Upload;
 
@@ -67,9 +69,11 @@ public class LiveUploadTests
         var first = $"xetsharp-live-{Guid.NewGuid():n}.bin";
         var second = $"xetsharp-live-{Guid.NewGuid():n}.bin";
 
-        // Big enough that the default one-in-1024 sample is certain to include an eligible chunk:
-        // 1024 chunks of ~64 KiB is about 64 MiB, so this is a few times that.
-        var content = UniqueContent(200_000_000);
+        // Big enough to span several xorbs, and vetted up front for a chunk the default one-in-1024
+        // sample will actually ask the global index about. Size alone does not settle that: 200 MB
+        // is only about 3,000 chunks, which leaves roughly a one-in-twenty chance of a file with no
+        // eligible chunk at all — and no query means nothing to deduplicate against.
+        var content = UniqueContentWithAnEligibleChunk(200_000_000);
 
         using var client = new XetClient();
         try
@@ -101,6 +105,26 @@ public class LiveUploadTests
         var content = TestData.SplitMix64Bytes(seed, length);
         Guid.NewGuid().ToByteArray().CopyTo(content, 0);
         return content;
+    }
+
+    /// <summary>
+    /// Unique bytes that are certain to contain a chunk eligible for a global-deduplication query —
+    /// one whose hash is zero modulo the sample rate. Eligibility is a property of the content, so
+    /// the only way to be sure of it is to chunk the candidate and look.
+    /// </summary>
+    private static byte[] UniqueContentWithAnEligibleChunk(int length)
+    {
+        while (true)
+        {
+            var content = UniqueContent(length);
+            var eligible = Chunker.ChunkAll(content).Any(chunk =>
+                XetHashes.ChunkHash(chunk).Mod(XetUploadOptions.DefaultGlobalDeduplicationSampleRate) == 0);
+
+            if (eligible)
+            {
+                return content;
+            }
+        }
     }
 
     private static async Task DeleteAsync(XetClient client, XetRepository repository, params string[] paths)

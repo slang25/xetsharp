@@ -28,7 +28,8 @@ internal sealed class UploadDeduplicator(
     /// <summary>
     /// Chunks whose xorb is settled: everything this upload has sealed, plus every hit found in a
     /// deduplication response. Hits are cached here so a repeat costs a dictionary lookup rather
-    /// than an HMAC against every shard.
+    /// than an HMAC against every shard, and each carries the expiry of the response that vouched
+    /// for it — a xorb this upload packed itself has none.
     /// </summary>
     private readonly Dictionary<MerkleHash, ChunkLocation> _known = [];
 
@@ -53,7 +54,7 @@ internal sealed class UploadDeduplicator(
     {
         foreach (var (chunkHash, index) in _pending)
         {
-            _known.TryAdd(chunkHash, new ChunkLocation(xorbHash, index));
+            _known[chunkHash] = new ChunkLocation(xorbHash, index, ExpiresAt: null);
         }
 
         _pending.Clear();
@@ -72,7 +73,14 @@ internal sealed class UploadDeduplicator(
 
         if (_known.TryGetValue(chunkHash, out var known))
         {
-            return new ChunkPlacement(known.Xorb, known.Index);
+            if (!IsExpired(known.ExpiresAt))
+            {
+                return new ChunkPlacement(known.Xorb, known.Index);
+            }
+
+            // The response that vouched for this chunk has since lapsed, so the cached answer goes
+            // with it and the chunk is packed again below.
+            _known.Remove(chunkHash);
         }
 
         if (Search(chunkHash) is { } found)
@@ -110,11 +118,16 @@ internal sealed class UploadDeduplicator(
 
     private ChunkPlacement? Search(MerkleHash chunkHash)
     {
+        // An upload long enough to outlive a response it collected earlier stops leaning on it here.
+        // Terms already placed against it stand: the shard is a snapshot of what the service held
+        // when it answered, and there is nothing to re-point them at.
+        _shards.RemoveAll(IsExpired);
+
         foreach (var shard in _shards)
         {
             if (shard.TryFindChunk(chunkHash, out var xorb, out var index))
             {
-                _known[chunkHash] = new ChunkLocation(xorb.XorbHash, index);
+                _known[chunkHash] = new ChunkLocation(xorb.XorbHash, index, shard.Footer?.ExpiresAt);
                 return new ChunkPlacement(xorb.XorbHash, index);
             }
         }
@@ -127,8 +140,13 @@ internal sealed class UploadDeduplicator(
     /// upload that references the shard's xorbs, which would fail the whole upload rather than just
     /// the deduplication — so an expired shard is dropped rather than used.
     /// </summary>
-    private bool IsExpired(MdbShard shard) =>
-        shard.Footer?.ExpiresAt is { } expiry && expiry <= timeProvider.GetUtcNow();
+    private bool IsExpired(MdbShard shard) => IsExpired(shard.Footer?.ExpiresAt);
 
-    private readonly record struct ChunkLocation(MerkleHash Xorb, int Index);
+    private bool IsExpired(DateTimeOffset? expiresAt) => expiresAt is { } expiry && expiry <= timeProvider.GetUtcNow();
+
+    /// <summary>
+    /// Where a chunk was found, and when that answer stops being good. <paramref name="ExpiresAt"/>
+    /// is null for a xorb this upload packed itself, which is ours for as long as the upload lasts.
+    /// </summary>
+    private readonly record struct ChunkLocation(MerkleHash Xorb, int Index, DateTimeOffset? ExpiresAt);
 }

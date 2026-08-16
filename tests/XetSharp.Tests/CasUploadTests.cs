@@ -71,6 +71,21 @@ public class CasUploadTests
         await Assert.That(handler.Requests).IsEmpty();
     }
 
+    /// <summary>
+    /// The shard endpoint has a limit of its own, and a caller who is over it should hear so before
+    /// copying and sending 64 MiB for the service to refuse.
+    /// </summary>
+    [Test]
+    public async Task Rejects_a_shard_over_the_size_limit()
+    {
+        var (client, handler) = NewClient(_ => FakeHttpHandler.Json("""{"result":1}"""));
+
+        await Assert.That(async () => await client.UploadShardAsync(Repository, new byte[MdbShard.MaxUploadSize + 1]))
+            .Throws<ArgumentException>();
+
+        await Assert.That(handler.Requests).IsEmpty();
+    }
+
     [Test]
     [Arguments(1, true)]
     [Arguments(0, false)]

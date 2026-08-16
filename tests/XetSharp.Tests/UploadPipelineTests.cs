@@ -297,6 +297,73 @@ public class UploadPipelineTests
         await Assert.That(result.XorbCount).IsEqualTo(1);
     }
 
+    /// <summary>
+    /// A response that lapses part-way through an upload stops being used the moment it does, so
+    /// the chunks placed after that are packed and uploaded rather than pointed at xorbs the
+    /// service may no longer vouch for. What was matched while it was good keeps its references —
+    /// which is why the file still has to come back byte for byte.
+    /// </summary>
+    [Test]
+    public async Task Stops_using_a_deduplication_response_once_it_lapses()
+    {
+        var block = TestData.SplitMix64Bytes(67, 4_000_000);
+        var content = (byte[])[.. block, .. block];
+        var time = new TestTimeProvider();
+        var (client, cas) = NewClient(QueryEveryChunk, time);
+        GiveTheServiceTheWholeFile(cas, content, MerkleHash.Zero, time.UtcNow.AddSeconds(30));
+
+        // Placing a chunk reads the clock, so a second per reading runs the upload past the expiry
+        // with most of the file still to place.
+        time.AutoAdvance = TimeSpan.FromSeconds(1);
+
+        var result = await client.UploadAsync(Repository, [XetUploadFile.FromBytes("data.bin", content)]);
+
+        await Assert.That(result.DeduplicatedBytes).IsGreaterThan(0L);
+        await Assert.That(result.XorbCount).IsGreaterThan(0);
+
+        using var downloaded = new MemoryStream();
+        await client.DownloadAsync(Repository, result.Files.Single().FileId.ToString(), downloaded);
+        await Assert.That(downloaded.ToArray()).IsEquivalentTo(content, CollectionOrdering.Matching);
+    }
+
+    /// <summary>
+    /// A xorb upload that fails takes the session down with it at the next xorb, rather than
+    /// letting the rest of the batch be read, packed and sent to a service that has already refused
+    /// the first of it.
+    /// </summary>
+    [Test]
+    public async Task Abandons_the_batch_as_soon_as_a_xorb_upload_fails()
+    {
+        var content = TestData.SplitMix64Bytes(71, 3_000_000);
+        var (client, cas) = NewClient(new XetUploadOptions { MaxXorbBytes = 300_000, MaxConcurrentUploads = 1 });
+        cas.RefusesXorbUploads = true;
+
+        await Assert.That(async () => await client.UploadAsync(Repository, [XetUploadFile.FromBytes("data.bin", content)]))
+            .Throws<XetApiException>();
+
+        // Ten xorbs' worth of data, of which only the first — and at worst the one sealed while it
+        // was still in flight — is ever sent.
+        await Assert.That(cas.Requests.Count(request => request.Contains("/v1/xorbs/"))).IsLessThan(3);
+        await Assert.That(cas.Requests.Any(request => request.EndsWith("/shards"))).IsFalse();
+    }
+
+    /// <summary>
+    /// A summary the Hub would refuse fails before anything is transferred. Left to the commit, it
+    /// would cost the whole upload and leave the bytes stored but unreferenced.
+    /// </summary>
+    [Test]
+    [Arguments("")]
+    [Arguments("   ")]
+    public async Task Rejects_a_commit_summary_before_uploading_anything(string summary)
+    {
+        var (client, cas) = NewClient();
+        var file = XetUploadFile.FromBytes("data.bin", TestData.SplitMix64Bytes(73, 100_000));
+
+        await Assert.That(async () => await client.UploadAndCommitAsync(Repository, [file], summary)).Throws<ArgumentException>();
+
+        await Assert.That(cas.Requests).IsEmpty();
+    }
+
     /// <summary>The streaming endpoint is preferred, and its predecessor is used where it is missing.</summary>
     [Test]
     public async Task Falls_back_to_the_v1_shard_upload_endpoint()
@@ -415,7 +482,7 @@ public class UploadPipelineTests
         return xorbHash;
     }
 
-    private static (XetClient Client, FakeCas Cas) NewClient(XetUploadOptions? upload = null)
+    private static (XetClient Client, FakeCas Cas) NewClient(XetUploadOptions? upload = null, TimeProvider? timeProvider = null)
     {
         var cas = new FakeCas();
         var client = new XetClient(new XetClientOptions
@@ -424,6 +491,7 @@ public class UploadPipelineTests
             UseAmbientCredentials = false,
             HttpClient = new HttpClient(new FakeHttpHandler(cas.Handler)),
             Upload = upload ?? XetUploadOptions.Default,
+            TimeProvider = timeProvider,
         });
 
         return (client, cas);

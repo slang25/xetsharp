@@ -244,6 +244,10 @@ public sealed class XetClient : IDisposable
         string? description = null,
         CancellationToken cancellationToken = default)
     {
+        // Checked here rather than left to the commit: a summary the Hub will refuse is worth
+        // knowing about before the files are transferred, not after.
+        ArgumentException.ThrowIfNullOrWhiteSpace(summary);
+
         var result = await UploadAsync(repository, files, cancellationToken).ConfigureAwait(false);
         var commit = await CommitAsync(
             repository,

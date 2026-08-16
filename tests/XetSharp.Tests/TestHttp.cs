@@ -94,10 +94,24 @@ internal sealed class TestTimeProvider : TimeProvider
 
     public DateTimeOffset UtcNow { get; set; } = new(2026, 8, 16, 12, 0, 0, TimeSpan.Zero);
 
+    /// <summary>
+    /// How far the clock moves on each reading. Zero — the default — holds it still; a small step
+    /// lets a test run something long enough to cross an expiry without any real waiting.
+    /// </summary>
+    public TimeSpan AutoAdvance { get; set; }
+
     /// <summary>Every delay asked for, in order.</summary>
     public List<TimeSpan> Delays { get; } = [];
 
-    public override DateTimeOffset GetUtcNow() => UtcNow;
+    public override DateTimeOffset GetUtcNow()
+    {
+        lock (_gate)
+        {
+            var now = UtcNow;
+            UtcNow += AutoAdvance;
+            return now;
+        }
+    }
 
     public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
     {

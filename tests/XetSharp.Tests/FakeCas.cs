@@ -37,6 +37,9 @@ internal sealed class FakeCas
     /// <summary>Whether the service serves the streaming <c>/v2/shards</c> endpoint.</summary>
     public bool ServesStreamingShardUpload { get; set; } = true;
 
+    /// <summary>Whether xorb uploads are refused, standing in for a service that has gone away.</summary>
+    public bool RefusesXorbUploads { get; set; }
+
     /// <summary>Chunk hashes asked about through the global-deduplication API.</summary>
     public List<MerkleHash> DedupeQueries { get; } = [];
 
@@ -61,6 +64,11 @@ internal sealed class FakeCas
 
         if (path.StartsWith("/v1/xorbs/default/"))
         {
+            if (RefusesXorbUploads)
+            {
+                return FakeHttpHandler.Status(HttpStatusCode.Forbidden);
+            }
+
             var hash = MerkleHash.Parse(path.AsSpan("/v1/xorbs/default/".Length));
             var body = Body(request);
             lock (_gate)

@@ -193,6 +193,13 @@ public sealed class CasClient
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(repository);
+        if (serializedShard.Length > MdbShard.MaxUploadSize)
+        {
+            throw new ArgumentException(
+                $"A shard of {serializedShard.Length} bytes is over the {MdbShard.MaxUploadSize}-byte limit the CAS service accepts. " +
+                "Register the files it describes in smaller batches.",
+                nameof(serializedShard));
+        }
 
         var token = await _tokenSource.GetTokenAsync(repository, XetTokenScope.Write, cancellationToken: cancellationToken)
             .ConfigureAwait(false);

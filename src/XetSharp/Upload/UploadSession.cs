@@ -244,8 +244,27 @@ internal sealed class UploadSession
         _uploadedBytes += packed.Serialized.Length;
 
         await _uploadSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
-        _uploads.RemoveAll(upload => upload.IsCompletedSuccessfully);
+        ObserveFinishedUploads();
         _uploads.Add(UploadXorbAsync(packed, cancellationToken));
+    }
+
+    /// <summary>
+    /// Drops the uploads that have finished, rethrowing the first failure among them. Waiting for
+    /// the final <see cref="Task.WhenAll(Task[])"/> to surface it would mean an upload that failed
+    /// on its first xorb — a rejected token, a service that is down — still read, packed and sent
+    /// the whole rest of the batch before anyone noticed.
+    /// </summary>
+    private void ObserveFinishedUploads()
+    {
+        foreach (var upload in _uploads)
+        {
+            if (upload.IsCompleted && !upload.IsCompletedSuccessfully)
+            {
+                upload.GetAwaiter().GetResult();
+            }
+        }
+
+        _uploads.RemoveAll(upload => upload.IsCompletedSuccessfully);
     }
 
     private async Task UploadXorbAsync(PackedXorb packed, CancellationToken cancellationToken)

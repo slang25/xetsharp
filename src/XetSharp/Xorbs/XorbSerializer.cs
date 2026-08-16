@@ -22,6 +22,19 @@ public static class XorbSerializer
     /// </summary>
     public static int SerializeChunk(ReadOnlySpan<byte> chunk, IBufferWriter<byte> destination)
     {
+        using var compressed = CompressChunk(chunk);
+        return WriteRecord(compressed, chunk, destination);
+    }
+
+    /// <summary>
+    /// Compresses one chunk both ways and keeps whichever record came out smallest, without writing
+    /// anything: the two halves of <see cref="SerializeChunk(ReadOnlySpan{byte}, IBufferWriter{byte})"/>
+    /// split apart so the packer can do this part on the thread pool and append the result in order
+    /// afterwards. Sharing the decision with the serial path is what keeps a parallel-packed xorb
+    /// byte-identical to a serially packed one.
+    /// </summary>
+    internal static CompressedChunk CompressChunk(ReadOnlySpan<byte> chunk)
+    {
         ArgumentOutOfRangeException.ThrowIfGreaterThan(chunk.Length, XorbChunkHeader.MaxUncompressedSize, nameof(chunk));
 
         using var lz4 = new PooledBufferWriter(chunk.Length);
@@ -33,19 +46,27 @@ public static class XorbSerializer
         var smallest = Math.Min(lz4.WrittenCount, byteGrouped.WrittenCount);
         if (smallest >= chunk.Length)
         {
-            return WriteRecord(
-                new XorbChunkHeader(chunk.Length, ChunkCompressionScheme.None, chunk.Length),
-                chunk,
-                destination);
+            return new CompressedChunk(new XorbChunkHeader(chunk.Length, ChunkCompressionScheme.None, chunk.Length));
         }
 
         var scheme = lz4.WrittenCount <= byteGrouped.WrittenCount
             ? ChunkCompressionScheme.Lz4
             : ChunkCompressionScheme.ByteGrouping4Lz4;
-        var data = scheme == ChunkCompressionScheme.Lz4 ? lz4.WrittenSpan : byteGrouped.WrittenSpan;
+        var winner = scheme == ChunkCompressionScheme.Lz4 ? lz4 : byteGrouped;
 
-        return WriteRecord(new XorbChunkHeader(data.Length, scheme, chunk.Length), data, destination);
+        // Taken over rather than copied out: the writer's pooled array becomes the record's, and the
+        // `using` above turns into a no-op for it.
+        var length = winner.WrittenCount;
+        return new CompressedChunk(new XorbChunkHeader(length, scheme, chunk.Length), winner.Detach(), length);
     }
+
+    /// <summary>
+    /// Writes a compressed chunk's record — header then payload — falling back to
+    /// <paramref name="chunk"/> itself for the chunks that are stored uncompressed. Returns the
+    /// number of bytes written.
+    /// </summary>
+    internal static int WriteRecord(in CompressedChunk compressed, ReadOnlySpan<byte> chunk, IBufferWriter<byte> destination) =>
+        WriteRecord(compressed.Header, compressed.IsStoredUncompressed ? chunk : compressed.Payload, destination);
 
     /// <summary>Serializes one chunk with a caller-chosen compression scheme.</summary>
     public static int SerializeChunk(ReadOnlySpan<byte> chunk, ChunkCompressionScheme scheme, IBufferWriter<byte> destination)

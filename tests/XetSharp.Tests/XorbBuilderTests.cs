@@ -6,7 +6,8 @@ namespace XetSharp.Tests;
 
 /// <summary>
 /// The packer that decides what goes in a xorb. Its one hard obligation is the CAS service's 64 MiB
-/// ceiling on a serialized xorb: exceeding it means an upload the service refuses.
+/// ceiling on a serialized xorb: exceeding it means an upload the service refuses. Its second is
+/// that compressing chunks in parallel changes nothing about the bytes that come out.
 /// </summary>
 public class XorbBuilderTests
 {
@@ -22,10 +23,10 @@ public class XorbBuilderTests
 
         while (builder.CanAdd(chunk.Length))
         {
-            builder.Add(chunk, XetHashes.ChunkHash(chunk));
+            await builder.AddAsync(chunk, XetHashes.ChunkHash(chunk));
         }
 
-        var packed = builder.Build();
+        var packed = await builder.BuildAsync();
         await Assert.That((uint)packed.Serialized.Length).IsGreaterThan(packed.Info.TotalUncompressedBytes);
         await Assert.That(packed.Serialized.Length).IsLessThanOrEqualTo(XorbSerializer.MaxSerializedSize);
     }
@@ -42,11 +43,12 @@ public class XorbBuilderTests
 
         while (builder.CanAdd(chunk.Length))
         {
-            builder.Add(chunk, XetHashes.ChunkHash(chunk));
+            await builder.AddAsync(chunk, XetHashes.ChunkHash(chunk));
         }
 
         await Assert.That(builder.ChunkCount).IsEqualTo(XorbBuilder.MaxChunks);
-        await Assert.That(() => builder.Add(chunk, XetHashes.ChunkHash(chunk))).Throws<InvalidOperationException>();
+        await Assert.That(async () => await builder.AddAsync(chunk, XetHashes.ChunkHash(chunk)))
+            .Throws<InvalidOperationException>();
     }
 
     /// <summary>
@@ -55,16 +57,18 @@ public class XorbBuilderTests
     /// stream.
     /// </summary>
     [Test]
-    public async Task Describes_what_it_packed()
+    [Arguments(1)]
+    [Arguments(4)]
+    public async Task Describes_what_it_packed(int parallelism)
     {
-        using var builder = new XorbBuilder(XorbBuilder.MaxUncompressedBytes);
+        using var builder = new XorbBuilder(XorbBuilder.MaxUncompressedBytes, parallelism);
         var chunks = Enumerable.Range(0, 5).Select(i => TestData.SplitMix64Bytes((ulong)i + 1, 10_000 + i)).ToArray();
         foreach (var chunk in chunks)
         {
-            builder.Add(chunk, XetHashes.ChunkHash(chunk));
+            await builder.AddAsync(chunk, XetHashes.ChunkHash(chunk));
         }
 
-        var packed = builder.Build();
+        var packed = await builder.BuildAsync();
 
         await Assert.That(packed.Hash).IsEqualTo(
             XetHashes.XorbHash([.. chunks.Select(chunk => (XetHashes.ChunkHash(chunk), (ulong)chunk.Length))]));
@@ -86,17 +90,19 @@ public class XorbBuilderTests
 
     /// <summary>Building empties the builder, so the next xorb starts at index zero and offset zero.</summary>
     [Test]
-    public async Task Starts_over_after_building()
+    [Arguments(1)]
+    [Arguments(4)]
+    public async Task Starts_over_after_building(int parallelism)
     {
-        using var builder = new XorbBuilder(XorbBuilder.MaxUncompressedBytes);
+        using var builder = new XorbBuilder(XorbBuilder.MaxUncompressedBytes, parallelism);
         var chunk = TestData.SplitMix64Bytes(9, 5_000);
 
-        builder.Add(chunk, XetHashes.ChunkHash(chunk));
-        builder.Build();
+        await builder.AddAsync(chunk, XetHashes.ChunkHash(chunk));
+        await builder.BuildAsync();
 
         await Assert.That(builder.IsEmpty).IsTrue();
-        await Assert.That(builder.Add(chunk, XetHashes.ChunkHash(chunk))).IsEqualTo(0);
-        await Assert.That(builder.Build().Info.Chunks.Single().ByteRangeStart).IsEqualTo(0u);
+        await Assert.That(await builder.AddAsync(chunk, XetHashes.ChunkHash(chunk))).IsEqualTo(0);
+        await Assert.That((await builder.BuildAsync()).Info.Chunks.Single().ByteRangeStart).IsEqualTo(0u);
     }
 
     [Test]
@@ -104,6 +110,122 @@ public class XorbBuilderTests
     {
         using var builder = new XorbBuilder(XorbBuilder.MaxUncompressedBytes);
 
-        await Assert.That(() => builder.Build()).Throws<InvalidOperationException>();
+        await Assert.That(async () => await builder.BuildAsync()).Throws<InvalidOperationException>();
+    }
+
+    /// <summary>
+    /// The whole point of the parallel path: it may compress chunks in any order it likes, but the
+    /// xorb it produces has to be indistinguishable from the one the inline path produces — the same
+    /// bytes, so the same hash, so the same object in the CAS. Data of three shapes, because which
+    /// compression scheme wins differs between them and a race would show up as a scheme applied to
+    /// the wrong chunk.
+    /// </summary>
+    [Test]
+    [Arguments(2)]
+    [Arguments(3)]
+    [Arguments(8)]
+    [Arguments(64)]
+    public async Task Packs_the_same_bytes_however_many_chunks_compress_at_once(int parallelism)
+    {
+        var chunks = MixedChunks();
+
+        var serial = await PackAsync(chunks, 1);
+        var parallelPacked = await PackAsync(chunks, parallelism);
+
+        await Assert.That(parallelPacked.Hash).IsEqualTo(serial.Hash);
+        await Assert.That(parallelPacked.Serialized).IsEquivalentTo(serial.Serialized, CollectionOrdering.Matching);
+        await Assert.That(parallelPacked.Info.SerializedLength).IsEqualTo(serial.Info.SerializedLength);
+        await Assert.That(parallelPacked.Info.TotalUncompressedBytes).IsEqualTo(serial.Info.TotalUncompressedBytes);
+        await Assert.That(parallelPacked.Info.Chunks).IsEquivalentTo(serial.Info.Chunks, CollectionOrdering.Matching);
+    }
+
+    /// <summary>
+    /// A chunk still compressing when a xorb is sealed has to be waited for, not dropped: the danger
+    /// with a bounded window is a xorb that seals with its last few records missing.
+    /// </summary>
+    [Test]
+    public async Task Waits_for_the_chunks_still_compressing_when_it_seals()
+    {
+        var chunks = MixedChunks();
+
+        var packed = await PackAsync(chunks, 8);
+
+        var round = XorbSerializer.Deserialize(packed.Serialized);
+        await Assert.That(round.Count).IsEqualTo(chunks.Length);
+        for (var i = 0; i < chunks.Length; i++)
+        {
+            await Assert.That(round[i]).IsEquivalentTo(chunks[i], CollectionOrdering.Matching);
+        }
+    }
+
+    /// <summary>
+    /// Disposing with chunks still in flight has to return their buffers and swallow their failures
+    /// rather than leaving an upload that already went wrong to fail a second time on the way out.
+    /// </summary>
+    [Test]
+    public async Task Disposing_mid_flight_is_quiet()
+    {
+        var builder = new XorbBuilder(XorbBuilder.MaxUncompressedBytes, 8);
+        foreach (var chunk in MixedChunks())
+        {
+            await builder.AddAsync(chunk, XetHashes.ChunkHash(chunk));
+        }
+
+        await Assert.That(builder.Dispose).ThrowsNothing();
+    }
+
+    /// <summary>
+    /// Chunks of the three kinds that take different paths through the serializer: text that plain
+    /// LZ4 wins on, float32 weights that byte grouping wins on, and random bytes that neither helps,
+    /// interleaved so a misordered record cannot go unnoticed.
+    /// </summary>
+    private static byte[][] MixedChunks()
+    {
+        var chunks = new List<byte[]>();
+        for (var i = 0; i < 30; i++)
+        {
+            chunks.Add((i % 3) switch
+            {
+                0 => TestData.SplitMix64Bytes((ulong)i + 1, 40_000 + i),
+                1 => Repeating(i, 50_000 + i),
+                _ => Weights(i, 60_000 + i),
+            });
+        }
+
+        return [.. chunks];
+    }
+
+    private static byte[] Repeating(int seed, int length)
+    {
+        var text = new byte[length];
+        for (var i = 0; i < length; i++)
+        {
+            text[i] = (byte)('a' + ((i + seed) % 16));
+        }
+
+        return text;
+    }
+
+    /// <summary>Float32s drifting slowly, where the top bytes barely change — what byte grouping is for.</summary>
+    private static byte[] Weights(int seed, int length)
+    {
+        var weights = new byte[length];
+        for (var i = 0; i + 4 <= length; i += 4)
+        {
+            BitConverter.TryWriteBytes(weights.AsSpan(i), 0.5f + (((i / 4) + seed) % 97) * 1e-4f);
+        }
+
+        return weights;
+    }
+
+    private static async Task<PackedXorb> PackAsync(byte[][] chunks, int parallelism)
+    {
+        using var builder = new XorbBuilder(XorbBuilder.MaxUncompressedBytes, parallelism);
+        foreach (var chunk in chunks)
+        {
+            await builder.AddAsync(chunk, XetHashes.ChunkHash(chunk));
+        }
+
+        return await builder.BuildAsync();
     }
 }

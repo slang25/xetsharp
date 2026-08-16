@@ -56,7 +56,7 @@ internal sealed class UploadSession
         _repository = repository;
         _options = options;
         _deduplicator = new UploadDeduplicator(casClient, repository, options, timeProvider);
-        _builder = new XorbBuilder(options.MaxXorbBytes);
+        _builder = new XorbBuilder(options.MaxXorbBytes, options.MaxCompressionParallelism);
         _uploadSlots = new SemaphoreSlim(options.MaxConcurrentUploads);
     }
 
@@ -219,7 +219,7 @@ internal sealed class UploadSession
             await SealCurrentXorbAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        var index = _builder.Add(chunk, chunkHash);
+        var index = await _builder.AddAsync(chunk, chunkHash, cancellationToken).ConfigureAwait(false);
         _deduplicator.RecordPending(chunkHash, index);
         Extend(build, new ChunkPlacement(null, index), chunk.Length);
     }
@@ -266,7 +266,7 @@ internal sealed class UploadSession
             return;
         }
 
-        var packed = _builder.Build();
+        var packed = await _builder.BuildAsync().ConfigureAwait(false);
         foreach (var term in _termsInCurrentXorb)
         {
             term.Xorb = packed.Hash;

@@ -19,6 +19,7 @@ transferred.
 | `ChunkingBenchmarks` | Chunking a 32 MiB buffer, allocation and all — random data, float32 weights, and fed in 4 MiB blocks as an upload reads a file. |
 | `HashingBenchmarks` | BLAKE3 chunk hashing, and the Merkle aggregations that turn chunk hashes into a file ID. |
 | `XorbBenchmarks` | Serializing a xorb (every chunk is compressed twice, so the smaller form can be stored) and reading one back. |
+| `PackingBenchmarks` | Packing a xorb at each degree of compression parallelism — compression alone, with the upload loop's hashing, and with its chunking too. The last is what an uploaded byte costs in CPU, and what `MaxCompressionParallelism`'s default was chosen from. |
 | `ShardBenchmarks` | Writing and parsing a shard describing 16 xorbs and 32 files. |
 
 ## Measuring on a Mac
@@ -35,6 +36,16 @@ Two things help:
   the host process, so whatever core the run gets, both sides get it.
 
 Treat a single run with a large `Error` column as noise rather than as a result.
+
+`PackingBenchmarks` needs more care than the rest, because it is the only suite that uses more than
+one core: it competes with whatever else is running for the same cores, so on a busy machine
+`--job short` produces a scaling curve that is not even monotonic. Give it a quiet machine and
+enough iterations to average the interference out:
+
+```sh
+dotnet run --project benchmarks/XetSharp.Benchmarks -c Release -- \
+  --filter '*Packing*' --inProcess --warmupCount 3 --iterationCount 15 --invocationCount 1 --unrollFactor 1
+```
 
 ## Comparing with hf_xet
 

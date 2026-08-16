@@ -7,9 +7,12 @@ namespace XetSharp.Benchmarks;
 
 /// <summary>
 /// The boundary scan on its own, with no chunk buffers or allocation in the way: the one-byte-at-a-
-/// time loop the protocol describes against the four-at-a-time form the chunker actually runs.
-/// Both are written out here rather than called into, so the comparison stays honest if the library
-/// changes — and so the reason the shipping loop is shaped the way it is can be re-measured.
+/// time loop the protocol describes — and the one the chunker ships — against the four-at-a-time
+/// unrolling of it, which is here as the rejected alternative rather than as anything the library
+/// runs. Unrolling looks like it should break a dependency chain; measured, it is the slower of the
+/// two, because shift-and-add is a single instruction on both x86 and Arm64 and the chain was never
+/// the limit. Both are written out here rather than called into, so the comparison stays honest if
+/// the library changes — and so the next person to have the idea can re-measure it.
 /// </summary>
 /// <remarks>
 /// Worth running with <c>--inProcess</c> on a machine with heterogeneous cores (any Apple Silicon
@@ -79,7 +82,8 @@ public class GearhashScanBenchmarks
 
     /// <summary>
     /// The same arithmetic with four bytes' worth written out, so only the <c>h &lt;&lt; n</c> terms
-    /// depend on the group before.
+    /// depend on the group before. Not what the chunker runs: this is the form that was tried and
+    /// dropped.
     /// </summary>
     [Benchmark, Bytes(PayloadSize)]
     public int FourAtATime()

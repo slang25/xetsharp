@@ -1,9 +1,13 @@
 <Project>
 
   <!-- IsPackable is set by the projects themselves, which are evaluated after Directory.Build.props
-       and before this file — so the README can only be attached to the packages from here. -->
+       and before this file — so the README and licence can only be attached to the packages from
+       here. The licence ships as a plain file alongside the MIT PackageLicenseExpression rather than
+       as PackageLicenseFile: the expression is what package feeds read, and the two cannot both be
+       set, but a copy in the package means the text travels with it. -->
   <ItemGroup Condition="'$(IsPackable)' == 'true'">
     <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)LICENSE" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
 
 </Project>

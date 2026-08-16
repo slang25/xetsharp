@@ -79,8 +79,6 @@ internal sealed class UploadSession
                 builds.Add(await ChunkAsync(file, reporter, cancellationToken).ConfigureAwait(false));
             }
 
-            reporter.Complete();
-
             await SealCurrentXorbAsync(cancellationToken).ConfigureAwait(false);
             await Task.WhenAll(_uploads).ConfigureAwait(false);
 
@@ -93,6 +91,11 @@ internal sealed class UploadSession
             }
 
             await _casClient.UploadShardAsync(_repository, shard, cancellationToken).ConfigureAwait(false);
+
+            // Last, not after the final read: the shard is what makes any of this retrievable, so
+            // until it is registered there is still a failure that would leave an observer holding a
+            // completion report for an upload that threw.
+            reporter.Complete();
         }
         catch
         {
@@ -145,13 +148,19 @@ internal sealed class UploadSession
 
                     sha256.AppendData(buffer.AsSpan(0, read));
                     build.Size += read;
-                    reporter.Advance(read);
 
                     chunks.Clear();
                     chunker.NextBlock(buffer.AsSpan(0, read), isFinal, chunks);
                     foreach (var chunk in chunks)
                     {
                         await PlaceAsync(build, chunk, cancellationToken).ConfigureAwait(false);
+
+                        // A chunk at a time rather than a read at a time: XetProgress counts bytes
+                        // placed, and the bytes a read hands over are not placed until the chunker
+                        // has closed a chunk over them. The two agree by the end — the final flush
+                        // emits whatever was still buffered — but only this order never reports a
+                        // byte that a later deduplication or packing failure means never landed.
+                        reporter.Advance(chunk.Length);
                     }
 
                     if (isFinal)

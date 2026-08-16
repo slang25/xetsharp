@@ -79,6 +79,12 @@ internal static partial class Log
         Message = "Uploaded {FileCount} file(s) as {XorbCount} xorb(s) ({UploadedBytes} bytes sent, {DeduplicatedBytes} deduplicated).")]
     public static partial void Uploaded(this ILogger logger, int fileCount, int xorbCount, long uploadedBytes, long deduplicatedBytes);
 
+    /// <remarks>
+    /// <paramref name="uri"/> must already have its query stripped. Xorb and shard requests go to
+    /// short-lived signed URLs whose query carries the credential (<c>Signature</c>,
+    /// <c>X-Xet-Signed-Range</c>), and a warning that fires on every flaky connection is exactly the
+    /// thing that would spread it across an application's logs.
+    /// </remarks>
     [LoggerMessage(EventId = 500, Level = LogLevel.Warning, Message = "Retrying {Method} {Uri} in {Delay} after {Reason} (attempt {Attempt} of {MaxAttempts}).")]
-    public static partial void Retrying(this ILogger logger, HttpMethod method, Uri? uri, TimeSpan delay, string reason, int attempt, int maxAttempts);
+    public static partial void Retrying(this ILogger logger, HttpMethod method, string uri, TimeSpan delay, string reason, int attempt, int maxAttempts);
 }

@@ -72,6 +72,27 @@ public class ProgressTests
         await Assert.That(reports.Reports[^1].BytesTransferred).IsEqualTo((long)ContentSize);
     }
 
+    /// <summary>
+    /// Progress is only ever a claim about what has been placed, and nothing is retrievable until
+    /// the shard naming it is registered. An upload that throws must therefore leave its observer
+    /// short of the total, rather than having told them it finished and then failed.
+    /// </summary>
+    [Test]
+    public async Task Reports_no_completion_for_an_upload_that_fails()
+    {
+        var content = TestData.SplitMix64Bytes(17, ContentSize);
+        var (client, cas) = NewClient();
+        cas.RefusesXorbUploads = true;
+        var reports = new RecordingProgress();
+
+        await Assert.That(async () => await client.UploadAsync(Repository, [XetUploadFile.FromBytes("data.bin", content)], reports))
+            .Throws<XetApiException>();
+
+        await Assert.That(cas.Shards).IsEmpty();
+        await Assert.That(reports.Reports[^1].BytesTransferred).IsLessThan(ContentSize);
+        await Assert.That(reports.IsMonotonic).IsTrue();
+    }
+
     [Test]
     public async Task Reports_download_progress_up_to_the_file_size()
     {

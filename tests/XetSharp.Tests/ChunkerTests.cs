@@ -78,11 +78,11 @@ public class ChunkerTests
     }
 
     /// <summary>
-    /// The shipping chunker skips ahead over bytes that cannot hold a boundary and scans four bytes
-    /// at a time; neither may move a boundary by so much as one byte. Checked against
-    /// <see cref="NaiveChunker"/>, which does exactly what the specification says and nothing else,
-    /// over data shapes the published vectors do not reach: long runs, sparse triggers, sizes that
-    /// leave a partial group at the end of every block.
+    /// The shipping chunker skips ahead over the bytes below the minimum chunk size that cannot hold
+    /// a boundary, and stops scanning where the maximum size forces one; neither shortcut may move a
+    /// boundary by so much as one byte. Checked against <see cref="NaiveChunker"/>, which does
+    /// exactly what the specification says and nothing else, over data shapes the published vectors
+    /// do not reach: long runs, sparse triggers, sizes that fall awkwardly against both limits.
     /// </summary>
     [Test]
     [Arguments(1_000_003)]
@@ -107,8 +107,9 @@ public class ChunkerTests
     }
 
     /// <summary>
-    /// The same check where the chunker is fed in awkward slices, so a boundary lands mid-group and
-    /// the four-at-a-time scan has to hand back to the byte-at-a-time one part way through.
+    /// The same check where the chunker is fed in awkward slices, so the state a boundary depends on
+    /// — the rolling hash, and how much of the current chunk is already buffered — has to survive
+    /// block splits that land anywhere, including inside the skip-ahead prefix.
     /// </summary>
     [Test]
     [Arguments(1)]

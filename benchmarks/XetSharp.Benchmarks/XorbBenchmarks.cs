@@ -6,8 +6,9 @@ namespace XetSharp.Benchmarks;
 
 /// <summary>
 /// Xorb serialization. Every chunk is compressed twice on the way out — plain LZ4 and byte-grouped
-/// LZ4 — because the format stores whichever came out smaller, so this is the upload path's second
-/// biggest cost after chunking.
+/// LZ4 — because the format stores whichever came out smaller, which makes this the upload path's
+/// biggest per-byte cost: it measures slower than chunking, and on float32 weights, where byte
+/// grouping does the most work, several times slower.
 /// </summary>
 [Config(typeof(XetBenchmarkConfig))]
 public class XorbBenchmarks

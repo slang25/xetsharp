@@ -59,7 +59,7 @@ public sealed class XetRetryHandler : DelegatingHandler
             catch (Exception exception) when (IsTransient(exception, cancellationToken) && !isLastAttempt)
             {
                 var backoff = BackoffFor(attempt);
-                Logger.Retrying(request.Method, request.RequestUri, backoff, exception.GetType().Name, attempt, MaxAttempts);
+                Logger.Retrying(request.Method, Redact(request.RequestUri), backoff, exception.GetType().Name, attempt, MaxAttempts);
                 await DelayAsync(backoff, cancellationToken).ConfigureAwait(false);
                 continue;
             }
@@ -76,10 +76,35 @@ public sealed class XetRetryHandler : DelegatingHandler
             }
 
             var delay = retryAfter ?? BackoffFor(attempt);
-            Logger.Retrying(request.Method, request.RequestUri, delay, $"{(int)response.StatusCode} {response.ReasonPhrase}", attempt, MaxAttempts);
+            Logger.Retrying(request.Method, Redact(request.RequestUri), delay, $"{(int)response.StatusCode} {response.ReasonPhrase}", attempt, MaxAttempts);
             response.Dispose();
             await DelayAsync(delay, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// A request's origin and path, with the query left off — enough to say which call is being
+    /// retried, and nothing more. CAS hands out short-lived signed URLs whose query holds the
+    /// credential itself (<c>Signature</c>, <c>X-Xet-Signed-Range</c>), so logging one whole would
+    /// write a usable credential into whatever the host application logs to.
+    /// </summary>
+    private static string Redact(Uri? uri)
+    {
+        if (uri is null)
+        {
+            return "(no URI)";
+        }
+
+        if (uri.IsAbsoluteUri)
+        {
+            return uri.GetLeftPart(UriPartial.Path);
+        }
+
+        // A relative URI only reaches a handler when one is sent through HttpMessageInvoker
+        // directly; GetLeftPart throws on those, so trim the query by hand.
+        var relative = uri.OriginalString;
+        var query = relative.IndexOf('?', StringComparison.Ordinal);
+        return query < 0 ? relative : relative[..query];
     }
 
     /// <summary>

@@ -66,6 +66,31 @@ public class LoggingTests
         await Assert.That(warning.Message).Contains("503");
     }
 
+    /// <summary>
+    /// CAS signs xorb URLs by putting the credential in the query, so the retry warning — the one
+    /// log line that carries a URL, and the one that fires on exactly the flaky connections a
+    /// support engineer will be reading logs about — has to stop at the path.
+    /// </summary>
+    [Test]
+    public async Task Keeps_a_signed_urls_query_out_of_the_retry_warning()
+    {
+        var log = new RecordingLoggerFactory();
+        var attempts = 0;
+        var handler = new FakeHttpHandler(_ => ++attempts < 2 ? FakeHttpHandler.Status(HttpStatusCode.ServiceUnavailable) : FakeHttpHandler.Json("{}"));
+        using var client = new HttpClient(new XetRetryHandler(handler, new TestTimeProvider())
+        {
+            Logger = log.CreateLogger("retry"),
+        });
+
+        await client.GetAsync("https://cas.invalid/xorbs/default/abc123?X-Xet-Signed-Range=0-1024&Signature=s3cr3t");
+
+        var warning = log.Entries.Single(entry => entry.Level == LogLevel.Warning);
+        await Assert.That(warning.Message).Contains("https://cas.invalid/xorbs/default/abc123");
+        await Assert.That(warning.Message).DoesNotContain("s3cr3t");
+        await Assert.That(warning.Message).DoesNotContain("Signature");
+        await Assert.That(warning.Message).DoesNotContain("X-Xet-Signed-Range");
+    }
+
     /// <summary>A client given no logger factory logs nowhere, and does not go looking for one.</summary>
     [Test]
     public async Task Logs_nothing_by_default()

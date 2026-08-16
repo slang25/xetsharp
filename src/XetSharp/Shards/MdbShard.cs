@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using XetSharp.Hashing;
 
 namespace XetSharp.Shards;
@@ -54,15 +55,19 @@ public sealed record MdbShard
         var casInfoOffset = offset;
         var xorbs = ReadCasInfoSection(shard, ref offset);
 
+        // Both forms have to account for every byte. Anything left over is either a lookup section
+        // (which this library does not read) or trailing junk, and silently dropping it would mean
+        // re-serializing to something shorter than what came in.
+        var expectedEnd = shard.Length - (int)footerSize;
+        if (offset != expectedEnd)
+        {
+            throw new InvalidDataException(
+                $"Shard sections end at offset {offset}, but the {(footerSize == 0 ? "shard itself" : "footer")} ends at {expectedEnd}.");
+        }
+
         if (footerSize == 0)
         {
             return new MdbShard { Files = files, Xorbs = xorbs };
-        }
-
-        if (offset != shard.Length - ShardFormat.FooterSize)
-        {
-            throw new InvalidDataException(
-                $"Shard sections end at offset {offset} but the footer starts at {shard.Length - ShardFormat.FooterSize}.");
         }
 
         return new MdbShard
@@ -127,20 +132,60 @@ public sealed record MdbShard
         var key = Footer?.ChunkHashHmacKey ?? MerkleHash.Zero;
         var wanted = key == MerkleHash.Zero ? chunkHash : XetHashes.Hmac(chunkHash, key);
 
-        foreach (var candidate in Xorbs)
+        if (ChunkIndexFor(Xorbs).TryGetValue(wanted, out var location))
         {
-            for (var i = 0; i < candidate.Chunks.Count; i++)
-            {
-                if (candidate.Chunks[i].Hash == wanted)
-                {
-                    (xorb, chunkIndex) = (candidate, i);
-                    return true;
-                }
-            }
+            (xorb, chunkIndex) = location;
+            return true;
         }
 
         (xorb, chunkIndex) = (null, -1);
         return false;
+    }
+
+    /// <summary>
+    /// The chunk-hash index for a CAS-info listing, built on first use and reused thereafter.
+    /// Deduplication walks every local chunk past the same shard, so rescanning the entries per
+    /// lookup would make matching quadratic in the two chunk counts.
+    /// </summary>
+    /// <remarks>
+    /// Keyed off the listing rather than held in a field: a record field would be copied by a
+    /// <c>with</c> expression that replaces <see cref="Xorbs"/>, leaving the copy answering from
+    /// the list it did not get, and would drag a cache into the generated equality.
+    /// </remarks>
+    private static Dictionary<MerkleHash, (ShardCasInfo Xorb, int Index)> ChunkIndexFor(IReadOnlyList<ShardCasInfo> xorbs) =>
+        ChunkIndexes.GetValue(xorbs, static listing =>
+        {
+            var entries = new Dictionary<MerkleHash, (ShardCasInfo, int)>();
+            foreach (var xorb in listing)
+            {
+                for (var i = 0; i < xorb.Chunks.Count; i++)
+                {
+                    // A chunk may be listed more than once; the first place it appears will do.
+                    entries.TryAdd(xorb.Chunks[i].Hash, (xorb, i));
+                }
+            }
+
+            return entries;
+        });
+
+    private static readonly ConditionalWeakTable<IReadOnlyList<ShardCasInfo>, Dictionary<MerkleHash, (ShardCasInfo Xorb, int Index)>> ChunkIndexes = new();
+
+    /// <summary>
+    /// Validates a record count a shard declares about itself before anything is allocated for it.
+    /// The count is attacker-controlled — a 48-byte header can claim four billion entries — so it
+    /// has to be checked against the bytes actually left, not trusted and then discovered to be
+    /// short one record at a time.
+    /// </summary>
+    private static uint CheckedRecordCount(uint declared, int recordsPerItem, int trailingRecords, int bytesRemaining, string what)
+    {
+        var needed = ((long)declared * recordsPerItem + trailingRecords) * ShardFormat.RecordSize;
+        if (needed > bytesRemaining)
+        {
+            throw new InvalidDataException(
+                $"Shard declares {declared} {what}, needing {needed} bytes, but only {bytesRemaining} remain.");
+        }
+
+        return declared;
     }
 
     private static int RecordCount(ShardFileInfo file) =>
@@ -172,7 +217,16 @@ public sealed record MdbShard
             var header = ReadRecord(shard, ref offset);
             var fileHash = new MerkleHash(header[..32]);
             var flags = (ShardFormat.FileFlags)BinaryPrimitives.ReadUInt32LittleEndian(header[32..]);
-            var termCount = (int)BinaryPrimitives.ReadUInt32LittleEndian(header[36..]);
+            var declaredTerms = BinaryPrimitives.ReadUInt32LittleEndian(header[36..]);
+
+            var recordsPerTerm = flags.HasFlag(ShardFormat.FileFlags.WithVerification) ? 2 : 1;
+            var trailingRecords = flags.HasFlag(ShardFormat.FileFlags.WithMetadataExt) ? 1 : 0;
+            var termCount = (int)CheckedRecordCount(
+                declaredTerms,
+                recordsPerTerm,
+                trailingRecords,
+                shard.Length - offset,
+                "terms");
 
             var xorbHashes = new MerkleHash[termCount];
             var lengths = new uint[termCount];
@@ -214,7 +268,12 @@ public sealed record MdbShard
         {
             var header = ReadRecord(shard, ref offset);
             var xorbHash = new MerkleHash(header[..32]);
-            var chunkCount = (int)BinaryPrimitives.ReadUInt32LittleEndian(header[36..]);
+            var chunkCount = (int)CheckedRecordCount(
+                BinaryPrimitives.ReadUInt32LittleEndian(header[36..]),
+                recordsPerItem: 1,
+                trailingRecords: 0,
+                shard.Length - offset,
+                "chunks");
             var totalUncompressed = BinaryPrimitives.ReadUInt32LittleEndian(header[40..]);
             var serializedLength = BinaryPrimitives.ReadUInt32LittleEndian(header[44..]);
 

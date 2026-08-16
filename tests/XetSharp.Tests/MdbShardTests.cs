@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using XetSharp.Hashing;
 using XetSharp.Shards;
 
@@ -260,6 +261,49 @@ public class MdbShardTests
         var truncated = ReferenceFiles.Read("ev-population.csv.shard")[..5000];
 
         await Assert.That(() => _ = MdbShard.Parse(truncated)).Throws<InvalidDataException>();
+    }
+
+    /// <summary>
+    /// A 48-byte record can claim four billion entries. Believing it and allocating before checking
+    /// the bytes are actually there turns a tiny malformed shard into an out-of-memory kill.
+    /// </summary>
+    [Test]
+    [Arguments(48 + 36)] // num_entries of the file-info header, which sits right after the shard header
+    [Arguments(288 + 36)] // num_entries of the CAS-info header, at this shard's cas_info_offset
+    public async Task Rejects_a_record_count_larger_than_the_remaining_bytes(int countOffset)
+    {
+        var corrupted = ReferenceFiles.Read("ev-population.csv.shard.verification");
+        BinaryPrimitives.WriteUInt32LittleEndian(corrupted.AsSpan(countOffset), uint.MaxValue);
+
+        await Assert.That(() => _ = MdbShard.Parse(corrupted)).Throws<InvalidDataException>();
+    }
+
+    /// <summary>
+    /// The footerless upload form has no offsets to cross-check, so the only thing keeping trailing
+    /// bytes from being silently dropped on round-trip is insisting the sections reach the end.
+    /// </summary>
+    [Test]
+    public async Task Rejects_trailing_bytes_after_a_footerless_shard()
+    {
+        byte[] padded = [.. ReferenceFiles.Read("ev-population.csv.shard.verification-no-footer"), 0, 0, 0, 0];
+
+        await Assert.That(() => _ = MdbShard.Parse(padded)).Throws<InvalidDataException>();
+    }
+
+    /// <summary>
+    /// Chunk lookups have to survive the record being copied with a different xorb list, which is
+    /// where a cached index would otherwise answer from the list it was built against.
+    /// </summary>
+    [Test]
+    public async Task Chunk_lookup_follows_a_replaced_xorb_list()
+    {
+        var shard = MdbShard.Parse(ReferenceFiles.Read("ev-population.csv.shard.verification"));
+        var chunkHash = ReferenceFiles.Chunks[0].Hash;
+
+        await Assert.That(shard.TryFindChunk(chunkHash, out _, out _)).IsTrue();
+        await Assert.That((shard with { Xorbs = [] }).TryFindChunk(chunkHash, out _, out _)).IsFalse();
+        await Assert.That(shard.TryFindChunk(chunkHash, out _, out var index)).IsTrue();
+        await Assert.That(index).IsEqualTo(0);
     }
 
     private static int FirstDifference(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right)

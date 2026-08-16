@@ -96,14 +96,14 @@ internal static class ChunkCompression
 
     private static int Encode(ReadOnlySpan<byte> source, IBufferWriter<byte> destination)
     {
-        var counting = new CountingWriter(destination);
+        var counting = new CountingWriter(destination, int.MaxValue);
         LZ4Frame.Encode(source, counting, EncoderSettings);
         return counting.BytesWritten;
     }
 
     private static void Decode(ReadOnlySpan<byte> source, int uncompressedSize, IBufferWriter<byte> destination)
     {
-        var counting = new CountingWriter(destination);
+        var counting = new CountingWriter(destination, uncompressedSize);
         LZ4Frame.Decode(source, counting);
         if (counting.BytesWritten != uncompressedSize)
         {
@@ -112,13 +112,29 @@ internal static class ChunkCompression
         }
     }
 
-    /// <summary>Forwards to an inner writer while tracking how many bytes passed through.</summary>
-    private sealed class CountingWriter(IBufferWriter<byte> inner) : IBufferWriter<byte>
+    /// <summary>
+    /// Forwards to an inner writer while tracking how many bytes passed through, refusing to let
+    /// more than <paramref name="limit"/> of them through.
+    /// </summary>
+    /// <remarks>
+    /// The limit is what stops a hostile xorb from being a decompression bomb: chunk data arrives
+    /// from a CDN, and the frame's own header says nothing trustworthy about how far it expands, so
+    /// waiting until the frame finishes to compare against the declared size is too late. The check
+    /// lands on <see cref="Advance"/> rather than <see cref="GetSpan"/> because a decoder legitimately
+    /// asks for a whole block's worth of room and then fills only part of it.
+    /// </remarks>
+    private sealed class CountingWriter(IBufferWriter<byte> inner, int limit) : IBufferWriter<byte>
     {
         public int BytesWritten { get; private set; }
 
         public void Advance(int count)
         {
+            if (count > limit - BytesWritten)
+            {
+                throw new InvalidDataException(
+                    $"Chunk decompressed past the {limit} bytes its header claims; refusing to continue.");
+            }
+
             BytesWritten += count;
             inner.Advance(count);
         }

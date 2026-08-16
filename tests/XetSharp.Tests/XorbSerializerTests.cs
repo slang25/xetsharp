@@ -180,6 +180,49 @@ public class XorbSerializerTests
         await Assert.That(() => _ = XorbSerializer.Deserialize(corrupted)).Throws<InvalidDataException>();
     }
 
+    /// <summary>
+    /// Chunk data comes off a CDN, so a hostile xorb could declare a small chunk whose LZ4 frame
+    /// expands without bound. Decoding has to stop at the declared size, not discover the overrun
+    /// after the whole frame has been buffered.
+    /// </summary>
+    [Test]
+    public async Task Rejects_a_chunk_that_decompresses_past_its_declared_size()
+    {
+        // Eight megabytes of zeroes compress to a few KB, so the record stays small while the frame
+        // inside it expands far past the 4 KiB its header claims. Built by hand, because the
+        // serializer rightly refuses to make a chunk this size in the first place.
+        var payload = new ArrayBufferWriter<byte>();
+        ChunkCompression.Compress(new byte[8 * 1024 * 1024], ChunkCompressionScheme.Lz4, payload);
+        var record = new ArrayBufferWriter<byte>();
+        new XorbChunkHeader(payload.WrittenCount, ChunkCompressionScheme.Lz4, 4096)
+            .WriteTo(record.GetSpan(XorbChunkHeader.Size));
+        record.Advance(XorbChunkHeader.Size);
+        record.Write(payload.WrittenSpan);
+
+        var bytes = record.WrittenSpan.ToArray();
+        var destination = new CountingWriter();
+
+        await Assert.That(() => DecodeInto(bytes, destination)).Throws<InvalidDataException>();
+
+        // The point is *where* it fails: comparing lengths after the frame finished would have let
+        // all 8 MiB through first.
+        await Assert.That(destination.BytesWritten).IsLessThanOrEqualTo(4096);
+
+        static void DecodeInto(byte[] serialized, IBufferWriter<byte> destination) =>
+            new XorbChunkReader(serialized).TryReadChunk(destination);
+    }
+
+    [Test]
+    public async Task Rejects_a_set_of_chunks_that_serializes_past_the_xorb_limit()
+    {
+        // Incompressible, so 512 chunks of 128 KiB serialize to just over the 64 MiB limit.
+        var chunk = TestData.SplitMix64Bytes(seed: 3, count: XorbChunkHeader.MaxUncompressedSize);
+        var chunks = Enumerable.Repeat((ReadOnlyMemory<byte>)chunk, 512).ToArray();
+
+        await Assert.That(() => _ = XorbSerializer.Serialize(chunks, new ArrayBufferWriter<byte>()))
+            .Throws<ArgumentException>();
+    }
+
     [Test]
     public async Task Rejects_a_chunk_larger_than_the_protocol_maximum()
     {
@@ -187,5 +230,23 @@ public class XorbSerializerTests
 
         await Assert.That(() => XorbSerializer.SerializeChunk(oversized, new ArrayBufferWriter<byte>()))
             .Throws<ArgumentOutOfRangeException>();
+    }
+
+    /// <summary>An <see cref="ArrayBufferWriter{T}"/> that keeps its tally after a failed write.</summary>
+    private sealed class CountingWriter : IBufferWriter<byte>
+    {
+        private readonly ArrayBufferWriter<byte> _inner = new();
+
+        public int BytesWritten { get; private set; }
+
+        public void Advance(int count)
+        {
+            BytesWritten += count;
+            _inner.Advance(count);
+        }
+
+        public Memory<byte> GetMemory(int sizeHint = 0) => _inner.GetMemory(sizeHint);
+
+        public Span<byte> GetSpan(int sizeHint = 0) => _inner.GetSpan(sizeHint);
     }
 }

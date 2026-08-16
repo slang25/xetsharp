@@ -65,7 +65,8 @@ public static class XorbSerializer
     /// <summary>
     /// Serializes a whole xorb: every chunk in order, each compressed with the scheme that suits it
     /// best. Returns the serialized length, which the caller records as the shard's
-    /// <c>num_bytes_on_disk</c>.
+    /// <c>num_bytes_on_disk</c>. Throws once the result would exceed
+    /// <see cref="MaxSerializedSize"/>, rather than emitting a xorb the CAS server will reject.
     /// </summary>
     public static int Serialize(IEnumerable<ReadOnlyMemory<byte>> chunks, IBufferWriter<byte> destination)
     {
@@ -73,6 +74,15 @@ public static class XorbSerializer
         foreach (var chunk in chunks)
         {
             written += SerializeChunk(chunk.Span, destination);
+
+            // Only the compressed size counts against the limit, so this can only be judged after
+            // each chunk is compressed — an uncompressed-length estimate would reject xorbs that fit.
+            if (written > MaxSerializedSize)
+            {
+                throw new ArgumentException(
+                    $"These chunks serialize to at least {written} bytes, over the {MaxSerializedSize}-byte xorb limit; pack fewer per xorb.",
+                    nameof(chunks));
+            }
         }
 
         return written;

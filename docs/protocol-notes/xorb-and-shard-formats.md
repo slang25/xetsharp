@@ -70,7 +70,7 @@ If compression makes the chunk *larger*, the chunk SHOULD be stored uncompressed
 > **Verified against the reference xorb, 2026-08-16.** The spec says only "standard LZ4 compression",
 > which reads like the bare LZ4 block format. It is not: every chunk payload in
 > `eea25d6e….xorb` begins with the LZ4 frame magic `04 22 4d 18`, with `FLG = 0x60` (independent
-> blocks, no checksums) and `BD = 0x50` (4 MiB max block). Decoding as a block yields garbage.
+> blocks, no checksums) and `BD = 0x50` (256 KiB max block). Decoding as a block yields garbage.
 > In .NET that means `K4os.Compression.LZ4.Streams.LZ4Frame`, not `LZ4Codec.Decode`.
 
 #### BG4 transform (scheme 2)

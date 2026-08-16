@@ -66,10 +66,50 @@ await client.UploadAndCommitAsync(
     summary: "Add the model");
 ```
 
+## Watching a transfer
+
+Any download or upload takes an `IProgress<XetProgress>`. Progress is reported about once a
+megabyte, and once more when the transfer finishes, so a fast link does not drown the consumer:
+
+```csharp
+var progress = new Progress<XetProgress>(p =>
+    Console.WriteLine($"{p.BytesTransferred:N0} bytes{(p.Fraction is { } done ? $" ({done:P0})" : "")}"));
+
+await client.DownloadToFileAsync(repository, "model.safetensors", "model.safetensors", progress);
+```
+
+`TotalBytes` is null when nothing can say how big the transfer is — uploading from a stream that
+cannot be measured, for instance — and `Fraction` is null with it, rather than guessing.
+
+For a log, hand the client a logger factory. The library depends on the logging *abstractions* only
+and defaults to `NullLogger`, so nothing is formatted unless someone is listening:
+
+```csharp
+using var client = new XetClient(new XetClientOptions { LoggerFactory = loggerFactory });
+```
+
+Transfers are reported at Information, requests, tokens and xorbs at Debug, and retried requests at
+Warning.
+
+## Dependency injection
+
+`XetSharp.Extensions.DependencyInjection` registers a client over `IHttpClientFactory`, wired to the
+application's logging and `TimeProvider`:
+
+```csharp
+services.AddXetClient(options => options with { HubToken = configuration["HuggingFace:Token"] });
+```
+
+The call returns the `IHttpClientBuilder` for the named client behind it, so handlers, resilience or
+a different primary handler can be added the usual way. It is a separate package on purpose: the
+core library needs nothing from `Microsoft.Extensions.*` beyond `ILogger`.
+
 ## Layout
 
 - `src/XetSharp` — the client library
+- `src/XetSharp.Extensions.DependencyInjection` — `AddXetClient` for applications using DI
 - `tests/XetSharp.Tests` — verification suite ([TUnit](https://tunit.dev)), including cross-checks against the [xet-core](https://github.com/huggingface/xet-core) reference implementation
+- `benchmarks/XetSharp.Benchmarks` — [BenchmarkDotNet](https://benchmarkdotnet.org) suites for the per-byte work ([how to run](benchmarks/README.md))
 
 ## Building
 

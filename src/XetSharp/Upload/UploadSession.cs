@@ -1,8 +1,11 @@
 using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using XetSharp.Cas;
 using XetSharp.Chunking;
+using XetSharp.Diagnostics;
 using XetSharp.Hashing;
 using XetSharp.Hub;
 using XetSharp.Shards;
@@ -25,6 +28,7 @@ internal sealed class UploadSession
     private readonly UploadDeduplicator _deduplicator;
     private readonly XorbBuilder _builder;
     private readonly SemaphoreSlim _uploadSlots;
+    private readonly ILogger _logger;
 
     /// <summary>Xorb uploads not yet known to have succeeded. Completed ones are dropped as they go.</summary>
     private readonly List<Task> _uploads = [];
@@ -40,8 +44,14 @@ internal sealed class UploadSession
 
     private long _uploadedBytes;
 
-    public UploadSession(CasClient casClient, XetRepository repository, XetUploadOptions options, TimeProvider timeProvider)
+    public UploadSession(
+        CasClient casClient,
+        XetRepository repository,
+        XetUploadOptions options,
+        TimeProvider timeProvider,
+        ILogger? logger = null)
     {
+        _logger = logger ?? NullLogger.Instance;
         _casClient = casClient;
         _repository = repository;
         _options = options;
@@ -50,15 +60,26 @@ internal sealed class UploadSession
         _uploadSlots = new SemaphoreSlim(options.MaxConcurrentUploads);
     }
 
-    public async Task<XetUploadResult> RunAsync(IReadOnlyList<XetUploadFile> files, CancellationToken cancellationToken)
+    public async Task<XetUploadResult> RunAsync(
+        IReadOnlyList<XetUploadFile> files,
+        IProgress<XetProgress>? progress,
+        CancellationToken cancellationToken)
     {
         var builds = new List<FileBuild>(files.Count);
+
+        // Null unless every file can say how long it is: a part-known total would make a progress
+        // bar jump backwards when the unmeasurable file turned out to be the big one.
+        var lengths = files.Select(file => file.KnownLength).ToArray();
+        var reporter = new ProgressReporter(progress, lengths.All(length => length is not null) ? lengths.Sum() : null);
+
         try
         {
             foreach (var file in files)
             {
-                builds.Add(await ChunkAsync(file, cancellationToken).ConfigureAwait(false));
+                builds.Add(await ChunkAsync(file, reporter, cancellationToken).ConfigureAwait(false));
             }
+
+            reporter.Complete();
 
             await SealCurrentXorbAsync(cancellationToken).ConfigureAwait(false);
             await Task.WhenAll(_uploads).ConfigureAwait(false);
@@ -84,6 +105,8 @@ internal sealed class UploadSession
             _uploadSlots.Dispose();
         }
 
+        _logger.Uploaded(builds.Count, _newXorbs.Count, _uploadedBytes, builds.Sum(build => build.DeduplicatedBytes));
+
         return new XetUploadResult(
             [.. builds.Select(build => new XetUploadedFile(
                 build.Source.Path,
@@ -102,7 +125,7 @@ internal sealed class UploadSession
     /// Reads a file once, splitting it into chunks and placing each one, while hashing the whole
     /// thing for the SHA-256 a Git-backed repository's LFS pointer needs.
     /// </summary>
-    private async Task<FileBuild> ChunkAsync(XetUploadFile file, CancellationToken cancellationToken)
+    private async Task<FileBuild> ChunkAsync(XetUploadFile file, ProgressReporter reporter, CancellationToken cancellationToken)
     {
         var build = new FileBuild(file);
         var (content, leaveOpen) = await file.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -122,6 +145,7 @@ internal sealed class UploadSession
 
                     sha256.AppendData(buffer.AsSpan(0, read));
                     build.Size += read;
+                    reporter.Advance(read);
 
                     chunks.Clear();
                     chunker.NextBlock(buffer.AsSpan(0, read), isFinal, chunks);
@@ -160,6 +184,7 @@ internal sealed class UploadSession
         }
 
         build.FileId = XetHashes.FileHash(CollectionsMarshal.AsSpan(build.Chunks));
+        _logger.ChunkedFile(file.Path, build.Size, build.Chunks.Count, build.DeduplicatedBytes);
         return build;
     }
 
@@ -242,6 +267,7 @@ internal sealed class UploadSession
         _deduplicator.Seal(packed.Hash);
         _newXorbs.Add(packed.Info);
         _uploadedBytes += packed.Serialized.Length;
+        _logger.SealedXorb(packed.Hash, packed.Info.Chunks.Count, packed.Serialized.Length);
 
         await _uploadSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
         ObserveFinishedUploads();

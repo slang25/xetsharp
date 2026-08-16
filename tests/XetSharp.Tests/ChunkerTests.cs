@@ -77,6 +77,68 @@ public class ChunkerTests
         await Assert.That(Chunker.ChunkAll([])).IsEmpty();
     }
 
+    /// <summary>
+    /// The shipping chunker skips ahead over bytes that cannot hold a boundary and scans four bytes
+    /// at a time; neither may move a boundary by so much as one byte. Checked against
+    /// <see cref="NaiveChunker"/>, which does exactly what the specification says and nothing else,
+    /// over data shapes the published vectors do not reach: long runs, sparse triggers, sizes that
+    /// leave a partial group at the end of every block.
+    /// </summary>
+    [Test]
+    [Arguments(1_000_003)]
+    [Arguments(300_007)]
+    [Arguments(131_073)]
+    [Arguments(8_191)]
+    [Arguments(65)]
+    [Arguments(3)]
+    public async Task Chunks_where_the_specification_says_to(int size)
+    {
+        foreach (var data in new[]
+                 {
+                     TestData.SplitMix64Bytes(seed: 99, count: size),
+                     TestData.TriggeringPatternData(size, padding: 3),
+                     Repeated(size, 0x5A),
+                 })
+        {
+            var lengths = Chunker.ChunkAll(data).Select(chunk => chunk.Length).ToList();
+
+            await Assert.That(lengths).IsEquivalentTo(NaiveChunker.ChunkLengths(data), CollectionOrdering.Matching);
+        }
+    }
+
+    /// <summary>
+    /// The same check where the chunker is fed in awkward slices, so a boundary lands mid-group and
+    /// the four-at-a-time scan has to hand back to the byte-at-a-time one part way through.
+    /// </summary>
+    [Test]
+    [Arguments(1)]
+    [Arguments(3)]
+    [Arguments(4)]
+    [Arguments(7)]
+    [Arguments(4093)]
+    public async Task Chunks_where_the_specification_says_to_when_streamed(int blockSize)
+    {
+        var data = TestData.SplitMix64Bytes(seed: 100, count: 400_009);
+        var chunker = new Chunker();
+        var chunks = new List<byte[]>();
+
+        for (var position = 0; position < data.Length; position += blockSize)
+        {
+            var end = Math.Min(position + blockSize, data.Length);
+            chunker.NextBlock(data.AsSpan(position, end - position), isFinal: end == data.Length, chunks);
+        }
+
+        await Assert.That(chunks.Select(chunk => chunk.Length).ToList())
+            .IsEquivalentTo(NaiveChunker.ChunkLengths(data), CollectionOrdering.Matching);
+    }
+
+    private static byte[] Repeated(int size, byte value)
+    {
+        var data = new byte[size];
+        Array.Fill(data, value);
+        return data;
+    }
+
     [Test]
     [MethodDataSource(typeof(TriggeringPatternVectors), nameof(TriggeringPatternVectors.Cases))]
     public async Task Triggering_pattern_chunks_at_reference_boundaries(TriggeringPatternVectors.Case testCase)

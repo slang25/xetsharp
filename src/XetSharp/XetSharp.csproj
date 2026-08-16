@@ -4,15 +4,22 @@
     <Description>A modern, high-performance C# client for the Xet protocol (Hugging Face Xet storage).</Description>
     <IsPackable>true</IsPackable>
     <IsAotCompatible>true</IsAotCompatible>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Documentation here explains what is not obvious; a rule that every public member (CS1591) or
+         every parameter of a documented one (CS1573) must carry a comment produces "Gets the count."
+         on a member called Count, which helps nobody. -->
+    <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="XetSharp.Tests" />
+    <InternalsVisibleTo Include="XetSharp.Benchmarks" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Blake3" />
     <PackageReference Include="K4os.Compression.LZ4.Streams" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
   </ItemGroup>
 
 </Project>

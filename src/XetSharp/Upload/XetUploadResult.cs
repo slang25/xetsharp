@@ -32,7 +32,6 @@ public sealed record XetUploadedFile(
 /// <param name="UploadedBytes">Total serialized length of those xorbs — the bytes that went over the wire.</param>
 /// <param name="DeduplicatedBytes">File bytes that did not need uploading because the data already existed.</param>
 /// <param name="GlobalDeduplicationQueries">How many chunks were looked up against the CAS service's global index.</param>
-/// <param name="Commit">The Hub commit that published the files, when the upload was asked to make one.</param>
 public sealed record XetUploadResult(
     IReadOnlyList<XetUploadedFile> Files,
     int XorbCount,
@@ -40,5 +39,6 @@ public sealed record XetUploadResult(
     long DeduplicatedBytes,
     int GlobalDeduplicationQueries)
 {
+    /// <summary>The Hub commit that published the files, when the upload was asked to make one.</summary>
     public XetCommit? Commit { get; init; }
 }

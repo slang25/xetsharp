@@ -1,5 +1,8 @@
 using System.Net;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using XetSharp.Cas;
+using XetSharp.Diagnostics;
 
 namespace XetSharp.Download;
 
@@ -8,8 +11,10 @@ namespace XetSharp.Download;
 /// <see cref="XorbFetch"/> travels in a single request, because the URL's signature authorizes
 /// exactly that set of ranges and nothing else — altering or splitting them fails authorization.
 /// </summary>
-internal sealed class XorbRangeFetcher(HttpClient httpClient, int maxConcurrency)
+internal sealed class XorbRangeFetcher(HttpClient httpClient, int maxConcurrency, ILogger? logger = null)
 {
+    private readonly ILogger _logger = logger ?? NullLogger.Instance;
+
     /// <summary>
     /// The most a single response may occupy. A xorb is capped at 64 MiB serialized; the slack
     /// covers multipart framing and a server that answers a range request with the whole object.
@@ -45,6 +50,7 @@ internal sealed class XorbRangeFetcher(HttpClient httpClient, int maxConcurrency
             }
 
             var body = await ReadBodyAsync(response, cancellationToken).ConfigureAwait(false);
+            _logger.FetchedXorbData(body.Length, fetch.Ranges.Count, fetch.Url.Host);
             return response.Content.Headers.ContentType?.MediaType == "multipart/byteranges"
                 ? FromMultipart(fetch, response, body)
                 : FromSingleRange(fetch, response, body);

@@ -1,8 +1,12 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/XetSharp/XetSharp.csproj" />
+    <Project Path="src/XetSharp.Extensions.DependencyInjection/XetSharp.Extensions.DependencyInjection.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/XetSharp.Tests/XetSharp.Tests.csproj" />
+  </Folder>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/XetSharp.Benchmarks/XetSharp.Benchmarks.csproj" />
   </Folder>
 </Solution>

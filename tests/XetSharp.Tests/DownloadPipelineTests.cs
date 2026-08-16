@@ -202,6 +202,38 @@ public class DownloadPipelineTests
             .Throws<InvalidDataException>();
     }
 
+    /// <summary>
+    /// A cache serving a same-sized slice from the wrong offset would survive every length check and
+    /// put the wrong bytes into the file, and a range download has no whole-file hash to catch it.
+    /// The 206 says which bytes it carries; that has to be the ones we asked for.
+    /// </summary>
+    [Test]
+    public async Task Rejects_a_partial_response_covering_a_different_range()
+    {
+        var descriptor = Descriptor(0, 2);
+
+        // Well-formed xorb data of exactly the right length — but the server says it starts
+        // somewhere else, which is the one signal that it is not the slice that was asked for.
+        await Assert.That(() => DownloadAsync(
+                Reconstruction(Term(0, 2)),
+                serve: _ => FakeHttpHandler.Bytes(
+                    Serialized[(int)descriptor.Bytes.Start..(int)(descriptor.Bytes.End + 1)],
+                    rangeStart: descriptor.Bytes.Start + 1)))
+            .Throws<InvalidDataException>();
+    }
+
+    /// <summary>A 206 that does not say what it carries cannot be matched to what was asked for.</summary>
+    [Test]
+    public async Task Rejects_a_partial_response_without_a_content_range()
+    {
+        var descriptor = Descriptor(0, 2);
+
+        await Assert.That(() => DownloadAsync(
+                Reconstruction(Term(0, 2)),
+                serve: _ => FakeHttpHandler.Bytes(Serialized[..(int)descriptor.Bytes.Length])))
+            .Throws<InvalidDataException>();
+    }
+
     [Test]
     public async Task Surfaces_a_rejected_signed_url()
     {
@@ -292,7 +324,7 @@ public class DownloadPipelineTests
         static byte[] Slice((long Start, long End) range) => Serialized[(int)range.Start..(int)(range.End + 1)];
 
         return ranges.Length == 1
-            ? FakeHttpHandler.Bytes(Slice(ranges[0]))
+            ? FakeHttpHandler.Bytes(Slice(ranges[0]), rangeStart: ranges[0].Start)
             : FakeHttpHandler.Multipart("boundary42", [.. ranges.Select(range => (range.Start, range.End, Slice(range)))]);
     }
 

@@ -162,6 +162,24 @@ public class XetClientTests
         await Assert.That(exception!.StatusCode).IsEqualTo(HttpStatusCode.NotFound);
     }
 
+    /// <summary>
+    /// The inclusive end of such a range is past what a 64-bit offset can hold. Computed unchecked
+    /// it wraps below the offset and reads as an empty range, so the call would "succeed" with
+    /// nothing written.
+    /// </summary>
+    [Test]
+    public async Task Rejects_a_range_whose_end_runs_past_the_64_bit_range()
+    {
+        var handler = new FakeHttpHandler(Serve());
+        using var client = NewClient(handler);
+        using var destination = new MemoryStream();
+        var file = new XetFileInfo(FileId, FileContent.Length, null, null);
+
+        await Assert.That(async () =>
+                await client.DownloadAsync(Repository, file, destination, offset: long.MaxValue - 10, length: 100))
+            .Throws<ArgumentOutOfRangeException>();
+    }
+
     /// <summary>A download that fails verification must not leave a file that looks complete.</summary>
     [Test]
     public async Task Leaves_no_file_behind_when_a_download_fails()
@@ -240,7 +258,8 @@ public class XetClientTests
         {
             var header = request.Headers.NonValidated["Range"].ToString();
             var bounds = header["bytes=".Length..].Split('-');
-            return FakeHttpHandler.Bytes(Serialized[int.Parse(bounds[0])..(int.Parse(bounds[1]) + 1)]);
+            var start = int.Parse(bounds[0]);
+            return FakeHttpHandler.Bytes(Serialized[start..(int.Parse(bounds[1]) + 1)], rangeStart: start);
         }
 
         return FakeHttpHandler.Status(HttpStatusCode.NotFound);

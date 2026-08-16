@@ -90,7 +90,20 @@ public sealed record FileReconstruction
 
     internal static FileReconstruction FromJson(ReconstructionJson payload)
     {
-        var terms = (payload.Terms ?? []).Select(ToTerm).ToArray();
+        // An absent field is not an empty one: without this a response of `{}` would parse into a
+        // perfectly valid reconstruction of nothing, and a range download would report success
+        // having written no bytes. An empty file still sends `"terms": []`.
+        if (payload.Terms is null)
+        {
+            throw new InvalidDataException("The reconstruction response has no 'terms'.");
+        }
+
+        if (payload.Terms.Count > 0 && payload.Xorbs is null && payload.FetchInfo is null)
+        {
+            throw new InvalidDataException("The reconstruction response has terms but neither 'xorbs' nor 'fetch_info'.");
+        }
+
+        var terms = payload.Terms.Select(ToTerm).ToArray();
         var xorbs = payload.Xorbs is not null
             ? payload.Xorbs.ToDictionary(entry => ParseHash(entry.Key), entry => ToFetches(entry.Value))
             : (payload.FetchInfo ?? []).ToDictionary(entry => ParseHash(entry.Key), entry => ToFetchesV1(entry.Value));
@@ -204,7 +217,9 @@ public sealed record FileReconstruction
             throw new InvalidDataException("The reconstruction response is missing a chunk range.");
         }
 
-        if (range.Start < 0 || range.End < range.Start)
+        // Chunk indices are counted in a 32-bit space; a value past it would otherwise wrap into a
+        // negative index that every later check happily accepts.
+        if (range.Start < 0 || range.End < range.Start || range.End > int.MaxValue)
         {
             throw new InvalidDataException($"The reconstruction response carries an invalid chunk range [{range.Start}, {range.End}).");
         }

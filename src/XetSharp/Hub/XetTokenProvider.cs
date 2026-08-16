@@ -3,20 +3,22 @@ namespace XetSharp.Hub;
 /// <summary>Supplies CAS tokens, from wherever the caller wants them to come from.</summary>
 public interface IXetTokenSource
 {
-    /// <param name="forceRefresh">
-    /// Set when the CAS API rejected the current token: it discards whatever is cached rather than
-    /// handing the same rejected token back.
+    /// <param name="rejectedToken">
+    /// The token the CAS API just rejected, if this call is a retry. Whatever is cached is replaced
+    /// rather than handed back — unless it has already been replaced, in which case the caller gets
+    /// the replacement instead of minting yet another token.
     /// </param>
     ValueTask<XetToken> GetTokenAsync(
         XetRepository repository,
         XetTokenScope scope,
-        bool forceRefresh = false,
+        XetToken? rejectedToken = null,
         CancellationToken cancellationToken = default);
 }
 
 /// <summary>
 /// Caches Xet tokens per repository and scope, refreshing them <see cref="XetToken.RefreshBuffer"/>
-/// before they expire. Concurrent callers waiting on the same token share one Hub request.
+/// before they expire. Concurrent callers waiting on the same token share one Hub request — including
+/// the callers whose requests were all rejected with the same spent token.
 /// </summary>
 public sealed class XetTokenProvider(HubClient hubClient, TimeProvider? timeProvider = null) : IXetTokenSource
 {
@@ -28,7 +30,7 @@ public sealed class XetTokenProvider(HubClient hubClient, TimeProvider? timeProv
     public async ValueTask<XetToken> GetTokenAsync(
         XetRepository repository,
         XetTokenScope scope = XetTokenScope.Read,
-        bool forceRefresh = false,
+        XetToken? rejectedToken = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(repository);
@@ -38,7 +40,7 @@ public sealed class XetTokenProvider(HubClient hubClient, TimeProvider? timeProv
         Task<XetToken> request;
         lock (_gate)
         {
-            if (!forceRefresh && _cache.TryGetValue(key, out var cached) && IsUsable(cached, now))
+            if (_cache.TryGetValue(key, out var cached) && IsUsable(cached, now) && !HandedOut(cached, rejectedToken))
             {
                 request = cached;
             }
@@ -71,4 +73,14 @@ public sealed class XetTokenProvider(HubClient hubClient, TimeProvider? timeProv
 
     private static bool IsUsable(Task<XetToken> request, DateTimeOffset now) =>
         !request.IsCompleted || (request.IsCompletedSuccessfully && !request.Result.IsExpired(now));
+
+    /// <summary>
+    /// Whether the cached request is the one that produced a token the service has now rejected.
+    /// Identity is the instance handed out, not the value: a replacement minted for an unexpired
+    /// token can be byte-for-byte identical to it, and would otherwise look rejected in its turn. A
+    /// refresh already in flight is by definition a later one, so callers holding the rejected token
+    /// join it rather than starting another.
+    /// </summary>
+    private static bool HandedOut(Task<XetToken> request, XetToken? rejectedToken) =>
+        rejectedToken is not null && request.IsCompletedSuccessfully && ReferenceEquals(request.Result, rejectedToken);
 }

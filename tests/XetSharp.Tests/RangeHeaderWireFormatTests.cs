@@ -68,8 +68,26 @@ public class RangeHeaderWireFormatTests
         {
             using var connection = await listener.AcceptTcpClientAsync();
             await using var stream = connection.GetStream();
+
+            // TCP frames nothing: a single read can stop anywhere, including part-way through the
+            // header under test. Read on until the blank line that ends the header block.
             var buffer = new byte[8192];
-            var read = await stream.ReadAsync(buffer);
+            var read = 0;
+            while (read < buffer.Length)
+            {
+                var justRead = await stream.ReadAsync(buffer.AsMemory(read));
+                if (justRead == 0)
+                {
+                    break;
+                }
+
+                read += justRead;
+                if (buffer.AsSpan(0, read).IndexOf("\r\n\r\n"u8) >= 0)
+                {
+                    break;
+                }
+            }
+
             await stream.WriteAsync("HTTP/1.1 206 Partial Content\r\nContent-Length: 0\r\n\r\n"u8.ToArray());
             return Encoding.ASCII.GetString(buffer, 0, read);
         });

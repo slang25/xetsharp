@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
@@ -16,10 +17,12 @@ public sealed class CasClient
     private readonly IXetTokenSource _tokenSource;
 
     /// <summary>
-    /// Set once a deployment has been observed not to serve <c>/v2/reconstructions</c>, so later
-    /// files skip straight to v1 instead of paying for the probe every time.
+    /// The CAS origins observed not to serve <c>/v2/reconstructions</c>, so later files skip straight
+    /// to v1 instead of paying for the probe every time. Kept per origin because a token source can
+    /// hand out URLs for more than one deployment, and what one of them supports says nothing about
+    /// the others.
     /// </summary>
-    private volatile bool _reconstructionV2Unavailable;
+    private readonly ConcurrentDictionary<string, bool> _reconstructionV2Unavailable = new(StringComparer.OrdinalIgnoreCase);
 
     public CasClient(HttpClient httpClient, IXetTokenSource tokenSource)
     {
@@ -41,9 +44,14 @@ public sealed class CasClient
     {
         ArgumentNullException.ThrowIfNull(repository);
 
-        if (!_reconstructionV2Unavailable)
+        // Which deployment serves this repository is only known once a token has been minted for it,
+        // and the version probe below is per deployment. Tokens are cached, so asking costs nothing.
+        var token = await _tokenSource.GetTokenAsync(repository, XetTokenScope.Read, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!_reconstructionV2Unavailable.ContainsKey(OriginOf(token.CasUrl)))
         {
-            var response = await SendAsync(repository, ReconstructionRequest("v2", fileId, range), cancellationToken)
+            var (response, _) = await SendAsync(repository, ReconstructionRequest("v2", fileId, range), cancellationToken)
                 .ConfigureAwait(false);
             using (response)
             {
@@ -57,12 +65,18 @@ public sealed class CasClient
             }
         }
 
-        using var fallback = await SendAsync(repository, ReconstructionRequest("v1", fileId, range), cancellationToken)
+        var (fallback, fallbackToken) = await SendAsync(repository, ReconstructionRequest("v1", fileId, range), cancellationToken)
             .ConfigureAwait(false);
-        await EnsureReconstructionSuccessAsync(fallback, fileId, cancellationToken).ConfigureAwait(false);
-        _reconstructionV2Unavailable = true;
-        return FileReconstruction.Parse(await ReadBodyAsync(fallback, cancellationToken).ConfigureAwait(false));
+        using (fallback)
+        {
+            await EnsureReconstructionSuccessAsync(fallback, fileId, cancellationToken).ConfigureAwait(false);
+            _reconstructionV2Unavailable[OriginOf(fallbackToken.CasUrl)] = true;
+            return FileReconstruction.Parse(await ReadBodyAsync(fallback, cancellationToken).ConfigureAwait(false));
+        }
     }
+
+    /// <summary>The scheme, host and port a CAS URL points at — what "this deployment" means here.</summary>
+    private static string OriginOf(Uri casUrl) => casUrl.GetLeftPart(UriPartial.Authority);
 
     private static Func<XetToken, HttpRequestMessage> ReconstructionRequest(string version, MerkleHash fileId, ByteRange? range) =>
         token =>
@@ -79,17 +93,19 @@ public sealed class CasClient
 
     /// <summary>
     /// Sends a request with a fresh-enough token, retrying once against a newly minted token if the
-    /// service says the current one is no longer good.
+    /// service says the current one is no longer good. Returns the token the response was obtained
+    /// with, since it names the deployment that answered.
     /// </summary>
-    private async Task<HttpResponseMessage> SendAsync(
+    private async Task<(HttpResponseMessage Response, XetToken Token)> SendAsync(
         XetRepository repository,
         Func<XetToken, HttpRequestMessage> createRequest,
         CancellationToken cancellationToken,
         XetTokenScope scope = XetTokenScope.Read)
     {
+        XetToken? rejected = null;
         for (var attempt = 0; ; attempt++)
         {
-            var token = await _tokenSource.GetTokenAsync(repository, scope, attempt > 0, cancellationToken).ConfigureAwait(false);
+            var token = await _tokenSource.GetTokenAsync(repository, scope, rejected, cancellationToken).ConfigureAwait(false);
             using var request = createRequest(token);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.AccessToken);
 
@@ -97,10 +113,11 @@ public sealed class CasClient
                 .ConfigureAwait(false);
             if (response.StatusCode != HttpStatusCode.Unauthorized || attempt > 0)
             {
-                return response;
+                return (response, token);
             }
 
             response.Dispose();
+            rejected = token;
         }
     }
 

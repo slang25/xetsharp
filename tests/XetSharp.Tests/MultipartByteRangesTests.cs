@@ -41,6 +41,26 @@ public class MultipartByteRangesTests
         await Assert.That(parts.Single().Body.ToArray()).IsEquivalentTo(payload, CollectionOrdering.Matching);
     }
 
+    /// <summary>
+    /// Xorb bytes are arbitrary binary, so a part's data can contain the delimiter's bytes. Only a
+    /// delimiter that starts its own line ends a part; anything else is data.
+    /// </summary>
+    [Test]
+    public async Task Keeps_a_body_that_contains_the_delimiter_bytes_intact()
+    {
+        var payload = Concat(
+            "before"u8.ToArray(),
+            Encoding.ASCII.GetBytes($"--{Boundary} not a delimiter line"),
+            [0x00, 0x0d, 0x0a],
+            Encoding.ASCII.GetBytes($"trailing --{Boundary}"),
+            "after"u8.ToArray());
+        var body = Build(($"bytes 0-{payload.Length - 1}/{payload.Length}", payload));
+
+        var parts = MultipartByteRanges.Parse(body, Boundary);
+
+        await Assert.That(parts.Single().Body.ToArray()).IsEquivalentTo(payload, CollectionOrdering.Matching);
+    }
+
     [Test]
     public async Task Ignores_a_preamble_and_an_epilogue()
     {

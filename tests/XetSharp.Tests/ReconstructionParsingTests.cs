@@ -106,6 +106,47 @@ public class ReconstructionParsingTests
             .WithMessageContaining("chunk 2");
     }
 
+    /// <summary>
+    /// An absent protocol field is not an empty one. Treating it as empty turns a response that says
+    /// nothing into a reconstruction of nothing, which a range download would report as a success
+    /// having written no bytes.
+    /// </summary>
+    [Test]
+    [Arguments("{}")]
+    [Arguments("""{"offset_into_first_range":0}""")]
+    [Arguments("""{"offset_into_first_range":0,"xorbs":{}}""")]
+    [Arguments("""{"offset_into_first_range":0,"terms":[{"hash":"eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632","unpacked_length":100,"range":{"start":0,"end":4}}]}""")]
+    public async Task Rejects_a_response_missing_a_protocol_field(string json) =>
+        await Assert.That(() => FileReconstruction.Parse(Encoding.UTF8.GetBytes(json))).Throws<InvalidDataException>();
+
+    /// <summary>An empty file has nothing to fetch, and says so explicitly.</summary>
+    [Test]
+    public async Task Parses_an_empty_file()
+    {
+        var reconstruction = FileReconstruction.Parse("""{"offset_into_first_range":0,"terms":[],"xorbs":{}}"""u8);
+
+        await Assert.That(reconstruction.Terms).IsEmpty();
+        await Assert.That(reconstruction.ContentLength).IsEqualTo(0);
+    }
+
+    /// <summary>
+    /// Chunk indices live in a 32-bit space. A value past it would wrap into a negative index that
+    /// reads as a perfectly ordinary range.
+    /// </summary>
+    [Test]
+    public async Task Rejects_a_chunk_index_that_does_not_fit_in_an_int()
+    {
+        const string json = """
+        {
+          "offset_into_first_range": 0,
+          "terms": [{ "hash": "eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632", "unpacked_length": 100, "range": { "start": 0, "end": 2147483648 } }],
+          "xorbs": {}
+        }
+        """;
+
+        await Assert.That(() => FileReconstruction.Parse(Encoding.UTF8.GetBytes(json))).Throws<InvalidDataException>();
+    }
+
     [Test]
     public async Task Rejects_a_fetch_url_that_is_not_http()
     {

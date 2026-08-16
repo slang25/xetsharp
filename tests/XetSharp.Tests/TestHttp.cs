@@ -39,8 +39,21 @@ internal sealed class FakeHttpHandler(Func<HttpRequestMessage, HttpResponseMessa
         return response;
     }
 
-    public static HttpResponseMessage Bytes(byte[] body, HttpStatusCode status = HttpStatusCode.PartialContent) =>
-        new(status) { Content = new ByteArrayContent(body) };
+    /// <summary>
+    /// A body, as a 206 by default. <paramref name="rangeStart"/> adds the <c>Content-Range</c> a
+    /// real server sends with a partial response; leaving it off is how a test plays a server that
+    /// answers without one.
+    /// </summary>
+    public static HttpResponseMessage Bytes(byte[] body, HttpStatusCode status = HttpStatusCode.PartialContent, long? rangeStart = null)
+    {
+        var response = new HttpResponseMessage(status) { Content = new ByteArrayContent(body) };
+        if (rangeStart is { } start)
+        {
+            response.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, start + body.Length - 1);
+        }
+
+        return response;
+    }
 
     public static HttpResponseMessage Json(string body, HttpStatusCode status = HttpStatusCode.OK) =>
         new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };

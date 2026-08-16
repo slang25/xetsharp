@@ -99,7 +99,34 @@ internal sealed class XorbRangeFetcher(HttpClient httpClient, int maxConcurrency
             return [new XorbRangeData(descriptor, body.AsMemory((int)descriptor.Bytes.Start, (int)descriptor.Bytes.Length))];
         }
 
+        if (response.StatusCode == HttpStatusCode.PartialContent)
+        {
+            EnsureContentRangeMatches(response, descriptor.Bytes, fetch.Url);
+        }
+
         return [new XorbRangeData(descriptor, body)];
+    }
+
+    /// <summary>
+    /// Checks that a 206 answers the range that was asked for. The length is checked further down
+    /// the line, but a cache or proxy that serves a differently-offset slice of the same size would
+    /// pass that and quietly put the wrong bytes into the file — a range download has no whole-file
+    /// hash to catch it later.
+    /// </summary>
+    private static void EnsureContentRangeMatches(HttpResponseMessage response, ByteRange expected, Uri url)
+    {
+        var contentRange = response.Content.Headers.ContentRange;
+        if (contentRange is null || !string.Equals(contentRange.Unit, "bytes", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"The server answered {(int)response.StatusCode} for {url} without a usable Content-Range for the requested range {expected}.");
+        }
+
+        if (contentRange.From != expected.Start || contentRange.To != expected.End)
+        {
+            throw new InvalidDataException(
+                $"The server answered with bytes {contentRange.From}-{contentRange.To}, not the requested range {expected}.");
+        }
     }
 
     private static XorbRangeData[] FromMultipart(XorbFetch fetch, HttpResponseMessage response, byte[] body)

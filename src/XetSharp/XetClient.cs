@@ -137,6 +137,14 @@ public sealed class XetClient : IDisposable
             throw new ArgumentOutOfRangeException(nameof(length), length, "A download length cannot be negative.");
         }
 
+        // The inclusive end of the range is offset + length - 1, which would wrap around to a value
+        // below the offset and be mistaken for an empty range.
+        if (length is { } requested && requested > 0 && offset > long.MaxValue - (requested - 1))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(length), length, $"A download of {requested} bytes from offset {offset} ends past the end of the 64-bit range.");
+        }
+
         var knownSize = file.Size >= 0 ? file.Size : (long?)null;
         var isWholeFile = offset == 0 && (length is null || (knownSize is { } size && length >= size));
 

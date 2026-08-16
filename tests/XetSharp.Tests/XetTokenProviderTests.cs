@@ -43,10 +43,27 @@ public class XetTokenProviderTests
     {
         var (provider, handler, _) = NewProvider(expiresInSeconds: 3600);
 
-        await provider.GetTokenAsync(Repository);
-        await provider.GetTokenAsync(Repository, forceRefresh: true);
+        var rejected = await provider.GetTokenAsync(Repository);
+        await provider.GetTokenAsync(Repository, rejectedToken: rejected);
 
         await Assert.That(handler.Requests.Count).IsEqualTo(2);
+    }
+
+    /// <summary>
+    /// Several requests in flight against one token all get a 401 at once. They are all asking for
+    /// the same thing — a replacement for that one token — so one Hub request must serve them all.
+    /// </summary>
+    [Test]
+    public async Task Shares_one_refresh_between_callers_holding_the_same_rejected_token()
+    {
+        var (provider, handler, _) = NewProvider(expiresInSeconds: 3600);
+        var rejected = await provider.GetTokenAsync(Repository);
+
+        var replacements = await Task.WhenAll(
+            Enumerable.Range(0, 5).Select(_ => provider.GetTokenAsync(Repository, rejectedToken: rejected).AsTask()));
+
+        await Assert.That(handler.Requests.Count).IsEqualTo(2);
+        await Assert.That(replacements.Distinct().Count()).IsEqualTo(1);
     }
 
     /// <summary>Scope and revision are both part of a token's identity; neither can be shared.</summary>

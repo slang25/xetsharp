@@ -108,6 +108,37 @@ public class XetRetryHandlerTests
         await Assert.That(time.Delays.Single()).IsEqualTo(TimeSpan.FromSeconds(7));
     }
 
+    /// <summary>
+    /// The backoff cap is a cap on the backoff this client computes. Coming back before the server
+    /// said to would only spend the rate-limit budget it just told us we are out of.
+    /// </summary>
+    [Test]
+    public async Task Waits_out_a_retry_after_longer_than_the_backoff_cap()
+    {
+        var handler = RetryAfterOnce(TimeSpan.FromSeconds(120));
+
+        var (response, time) = await SendAsync(handler);
+
+        await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(time.Delays.Single()).IsEqualTo(TimeSpan.FromSeconds(120));
+    }
+
+    /// <summary>
+    /// A server asking us to come back in an hour is telling us to come back later, not to hold the
+    /// call open for an hour: the caller gets the response, Retry-After header and all.
+    /// </summary>
+    [Test]
+    public async Task Hands_back_a_response_asking_for_longer_than_it_will_wait()
+    {
+        var handler = RetryAfterOnce(TimeSpan.FromHours(1));
+
+        var (response, time) = await SendAsync(handler);
+
+        await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.TooManyRequests);
+        await Assert.That(response.Headers.RetryAfter?.Delta).IsEqualTo(TimeSpan.FromHours(1));
+        await Assert.That(time.Delays).IsEmpty();
+    }
+
     /// <summary>A body that can only be read once cannot be sent again, however transient the failure.</summary>
     [Test]
     public async Task Does_not_retry_a_request_whose_body_cannot_be_replayed()
@@ -146,6 +177,23 @@ public class XetRetryHandlerTests
 
         await Assert.That(attempts).IsEqualTo(2);
         await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.OK);
+    }
+
+    /// <summary>A handler that asks for a wait once, then succeeds.</summary>
+    private static FakeHttpHandler RetryAfterOnce(TimeSpan retryAfter)
+    {
+        var attempts = 0;
+        return new FakeHttpHandler(_ =>
+        {
+            if (++attempts > 1)
+            {
+                return FakeHttpHandler.Json("{}");
+            }
+
+            var response = FakeHttpHandler.Status(HttpStatusCode.TooManyRequests);
+            response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(retryAfter);
+            return response;
+        });
     }
 
     private static async Task<(HttpResponseMessage Response, TestTimeProvider Time)> SendAsync(

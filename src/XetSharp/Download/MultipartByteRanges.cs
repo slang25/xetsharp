@@ -21,7 +21,7 @@ internal static class MultipartByteRanges
         var delimiter = Encoding.ASCII.GetBytes("--" + boundary);
         var span = body.Span;
 
-        var position = span.IndexOf(delimiter);
+        var position = IndexOfDelimiterLine(span, delimiter, 0);
         if (position < 0)
         {
             throw new InvalidDataException($"The multipart response does not contain the boundary '{boundary}' the headers announced.");
@@ -40,17 +40,46 @@ internal static class MultipartByteRanges
             var headersStart = position + LineBreakLength(span, position, required: true);
             var range = ReadContentRange(span, headersStart, out var contentStart);
 
-            var next = span[contentStart..].IndexOf(delimiter);
-            if (next < 0)
+            var delimiterStart = IndexOfDelimiterLine(span, delimiter, contentStart);
+            if (delimiterStart < 0)
             {
                 throw new InvalidDataException("The multipart response ends in the middle of a part.");
             }
 
-            var delimiterStart = contentStart + next;
             var contentEnd = delimiterStart - TrailingLineBreakLength(span, delimiterStart);
             parts.Add(new MultipartByteRangePart(range, body[contentStart..contentEnd]));
             position = delimiterStart + delimiter.Length;
         }
+    }
+
+    /// <summary>
+    /// Finds the next boundary <em>delimiter line</em> at or after <paramref name="from"/>: the
+    /// delimiter at the start of a line, terminated by a line break or by the closing <c>--</c>.
+    /// Part bodies are arbitrary binary — xorb data, here — so the same bytes can perfectly well
+    /// occur inside one, and treating that as the start of the next part would truncate it.
+    /// </summary>
+    private static int IndexOfDelimiterLine(ReadOnlySpan<byte> span, ReadOnlySpan<byte> delimiter, int from)
+    {
+        for (var position = from; position <= span.Length - delimiter.Length;)
+        {
+            var found = span[position..].IndexOf(delimiter);
+            if (found < 0)
+            {
+                return -1;
+            }
+
+            var start = position + found;
+            var end = start + delimiter.Length;
+            var atLineStart = start == 0 || span[start - 1] == (byte)'\n';
+            if (atLineStart && (span[end..].StartsWith("--"u8) || LineBreakLength(span, end, required: false) > 0))
+            {
+                return start;
+            }
+
+            position = start + 1;
+        }
+
+        return -1;
     }
 
     /// <summary>

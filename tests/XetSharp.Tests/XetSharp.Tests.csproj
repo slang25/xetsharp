@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/XetSharp/XetSharp.csproj" />
+    <ProjectReference Include="../../src/XetSharp.Extensions.DependencyInjection/XetSharp.Extensions.DependencyInjection.csproj" />
   </ItemGroup>
 
   <ItemGroup>

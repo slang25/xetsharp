@@ -18,3 +18,5 @@ jobs:
           global-json-file: global.json
       - run: dotnet build --configuration Release
       - run: dotnet run --project tests/XetSharp.Tests --configuration Release --no-build
+      # Packing here so a broken package is a failed build rather than a discovery at release time.
+      - run: dotnet pack --configuration Release --no-build

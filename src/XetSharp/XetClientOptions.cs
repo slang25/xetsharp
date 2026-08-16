@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using XetSharp.Download;
 using XetSharp.Hub;
 using XetSharp.Upload;
@@ -33,6 +34,13 @@ public sealed record XetClientOptions
 
     /// <summary>How long any single HTTP request may take. Ignored when <see cref="HttpClient"/> is set.</summary>
     public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Where the client writes its log. Nothing is logged without one — the library depends on the
+    /// logging <em>abstractions</em> only, and defaults to <c>NullLogger</c>. Transfers report at
+    /// Information; requests, tokens and xorbs at Debug; retries at Warning.
+    /// </summary>
+    public ILoggerFactory? LoggerFactory { get; init; }
 
     /// <summary>Injected for tests; defaults to <see cref="System.TimeProvider.System"/>.</summary>
     public TimeProvider? TimeProvider { get; init; }

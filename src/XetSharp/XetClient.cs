@@ -1,7 +1,10 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using XetSharp.Cas;
+using XetSharp.Diagnostics;
 using XetSharp.Download;
 using XetSharp.Http;
 using XetSharp.Hub;
@@ -21,7 +24,12 @@ namespace XetSharp;
 /// </example>
 public sealed class XetClient : IDisposable
 {
-    private static readonly ProductInfoHeaderValue UserAgent = new(
+    /// <summary>
+    /// What this library calls itself. Public because a caller supplying its own
+    /// <see cref="System.Net.Http.HttpClient"/> has to add it: the Hub's traffic is attributed by
+    /// user agent, and a client that hides which implementation it is helps nobody diagnose it.
+    /// </summary>
+    public static ProductInfoHeaderValue UserAgent { get; } = new(
         "XetSharp",
         typeof(XetClient).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion?.Split('+')[0] ?? "0.1.0");
 
@@ -33,6 +41,8 @@ public sealed class XetClient : IDisposable
     private readonly XetDownloadOptions _downloadOptions;
     private readonly XetUploadOptions _uploadOptions;
     private readonly TimeProvider _timeProvider;
+    private readonly ILoggerFactory _loggerFactory;
+    private readonly ILogger _logger;
 
     public XetClient(XetClientOptions? options = null)
     {
@@ -41,15 +51,21 @@ public sealed class XetClient : IDisposable
         _uploadOptions = options.Upload;
         _uploadOptions.Validate();
         _timeProvider = options.TimeProvider ?? TimeProvider.System;
+        _loggerFactory = options.LoggerFactory ?? NullLoggerFactory.Instance;
+        _logger = _loggerFactory.CreateLogger<XetClient>();
         _ownsHttpClient = options.HttpClient is null;
-        _httpClient = options.HttpClient ?? CreateHttpClient(options);
+        _httpClient = options.HttpClient ?? CreateHttpClient(options, _loggerFactory);
 
         var token = options.HubToken ?? (options.UseAmbientCredentials ? HuggingFaceCredentials.ResolveToken() : null);
         _hub = new HubClient(_httpClient, options.HubUrl, token);
-        _cas = new CasClient(_httpClient, new XetTokenProvider(_hub, options.TimeProvider));
+        _cas = new CasClient(
+            _httpClient,
+            new XetTokenProvider(_hub, options.TimeProvider, _loggerFactory.CreateLogger<XetTokenProvider>()),
+            _loggerFactory.CreateLogger<CasClient>());
         _writer = new ReconstructionWriter(
-            new XorbRangeFetcher(_httpClient, _downloadOptions.MaxConcurrentDownloads),
-            _downloadOptions);
+            new XorbRangeFetcher(_httpClient, _downloadOptions.MaxConcurrentDownloads, _loggerFactory.CreateLogger<XorbRangeFetcher>()),
+            _downloadOptions,
+            _loggerFactory.CreateLogger<ReconstructionWriter>());
     }
 
     /// <summary>The Hub client this instance uses, for callers that need the raw endpoints.</summary>
@@ -70,10 +86,11 @@ public sealed class XetClient : IDisposable
         XetRepository repository,
         string path,
         Stream destination,
+        IProgress<XetProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
         var file = await GetFileInfoAsync(repository, path, cancellationToken).ConfigureAwait(false);
-        return await DownloadAsync(repository, file, destination, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return await DownloadAsync(repository, file, destination, progress: progress, cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -84,6 +101,7 @@ public sealed class XetClient : IDisposable
         XetRepository repository,
         string path,
         string destinationPath,
+        IProgress<XetProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
@@ -94,7 +112,7 @@ public sealed class XetClient : IDisposable
             var destination = new FileStream(partialPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20, useAsync: true);
             await using (destination.ConfigureAwait(false))
             {
-                result = await DownloadAsync(repository, path, destination, cancellationToken).ConfigureAwait(false);
+                result = await DownloadAsync(repository, path, destination, progress, cancellationToken).ConfigureAwait(false);
             }
 
             File.Move(partialPath, destinationPath, overwrite: true);
@@ -117,10 +135,11 @@ public sealed class XetClient : IDisposable
         Stream destination,
         long offset,
         long? length = null,
+        IProgress<XetProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
         var file = await GetFileInfoAsync(repository, path, cancellationToken).ConfigureAwait(false);
-        return await DownloadAsync(repository, file, destination, offset, length, cancellationToken).ConfigureAwait(false);
+        return await DownloadAsync(repository, file, destination, offset, length, progress, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -132,6 +151,7 @@ public sealed class XetClient : IDisposable
         Stream destination,
         long offset = 0,
         long? length = null,
+        IProgress<XetProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(repository);
@@ -186,13 +206,17 @@ public sealed class XetClient : IDisposable
 
         var reconstruction = await _cas.GetReconstructionAsync(repository, file.FileId, range, cancellationToken).ConfigureAwait(false);
 
-        return await _writer.WriteAsync(
+        var result = await _writer.WriteAsync(
             reconstruction,
             destination,
             maxBytes,
             isWholeFile && _downloadOptions.VerifyFileHash ? file.FileId : null,
             isWholeFile && _downloadOptions.VerifySha256 ? file.Sha256 : null,
+            progress,
             cancellationToken).ConfigureAwait(false);
+
+        _logger.Downloaded(result.BytesWritten, file.FileId);
+        return result;
     }
 
     /// <summary>
@@ -205,6 +229,7 @@ public sealed class XetClient : IDisposable
     public Task<XetUploadResult> UploadAsync(
         XetRepository repository,
         IReadOnlyList<XetUploadFile> files,
+        IProgress<XetProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(repository);
@@ -222,7 +247,8 @@ public sealed class XetClient : IDisposable
             throw new ArgumentException($"'{duplicate.Key}' is listed more than once.", nameof(files));
         }
 
-        return new UploadSession(_cas, repository, _uploadOptions, _timeProvider).RunAsync(files, cancellationToken);
+        return new UploadSession(_cas, repository, _uploadOptions, _timeProvider, _loggerFactory.CreateLogger<UploadSession>())
+            .RunAsync(files, progress, cancellationToken);
     }
 
     /// <summary>Uploads a single local file.</summary>
@@ -230,8 +256,9 @@ public sealed class XetClient : IDisposable
         XetRepository repository,
         string localPath,
         string? pathInRepository = null,
+        IProgress<XetProgress>? progress = null,
         CancellationToken cancellationToken = default) =>
-        UploadAsync(repository, [XetUploadFile.FromFile(localPath, pathInRepository)], cancellationToken);
+        UploadAsync(repository, [XetUploadFile.FromFile(localPath, pathInRepository)], progress, cancellationToken);
 
     /// <summary>
     /// Uploads files and then commits LFS pointers to them, which is what a Git-backed repository
@@ -242,13 +269,14 @@ public sealed class XetClient : IDisposable
         IReadOnlyList<XetUploadFile> files,
         string summary,
         string? description = null,
+        IProgress<XetProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
         // Checked here rather than left to the commit: a summary the Hub will refuse is worth
         // knowing about before the files are transferred, not after.
         ArgumentException.ThrowIfNullOrWhiteSpace(summary);
 
-        var result = await UploadAsync(repository, files, cancellationToken).ConfigureAwait(false);
+        var result = await UploadAsync(repository, files, progress, cancellationToken).ConfigureAwait(false);
         var commit = await CommitAsync(
             repository,
             new XetCommitRequest
@@ -278,7 +306,7 @@ public sealed class XetClient : IDisposable
         }
     }
 
-    private static HttpClient CreateHttpClient(XetClientOptions options)
+    private static HttpClient CreateHttpClient(XetClientOptions options, ILoggerFactory loggerFactory)
     {
         var handler = new SocketsHttpHandler
         {
@@ -290,7 +318,10 @@ public sealed class XetClient : IDisposable
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
         };
 
-        var client = new HttpClient(new XetRetryHandler(handler, options.TimeProvider))
+        var client = new HttpClient(new XetRetryHandler(handler, options.TimeProvider)
+        {
+            Logger = loggerFactory.CreateLogger<XetRetryHandler>(),
+        })
         {
             Timeout = options.RequestTimeout,
         };

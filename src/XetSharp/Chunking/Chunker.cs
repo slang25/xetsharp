@@ -123,6 +123,13 @@ public sealed class Chunker
 
         var createChunk = false;
         var hash = _hash;
+
+        // Deliberately one byte at a time. `h = (h << 1) + table[b]` looks like a dependency chain
+        // worth breaking — unroll it, and only the `h << n` terms depend on the previous group — but
+        // both x86 and Arm64 already do shift-and-add in a single instruction, so the chain is not
+        // what limits this loop. Unrolled four at a time it measured 1.4x *slower* (see
+        // benchmarks/XetSharp.Benchmarks/GearhashScanBenchmarks.cs, which keeps both forms around so
+        // the next person to have the idea can re-measure rather than take this on trust).
         while (index < readEnd)
         {
             hash = unchecked((hash << 1) + GearTable.Table[data[index]]);

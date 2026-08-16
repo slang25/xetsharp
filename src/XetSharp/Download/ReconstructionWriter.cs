@@ -1,6 +1,9 @@
 using System.Security.Cryptography;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using XetSharp.Buffers;
 using XetSharp.Cas;
+using XetSharp.Diagnostics;
 using XetSharp.Hashing;
 
 namespace XetSharp.Download;
@@ -18,8 +21,10 @@ public sealed record XetDownloadResult(long BytesWritten, MerkleHash? FileHash =
 /// Turns a reconstruction into file bytes: fetches the xorb ranges the terms need — several at a
 /// time, a bounded distance ahead of the writer — and writes each term's chunks out in order.
 /// </summary>
-internal sealed class ReconstructionWriter(XorbRangeFetcher fetcher, XetDownloadOptions options)
+internal sealed class ReconstructionWriter(XorbRangeFetcher fetcher, XetDownloadOptions options, ILogger? logger = null)
 {
+    private readonly ILogger _logger = logger ?? NullLogger.Instance;
+
     /// <param name="reconstruction">The response describing the file, or the requested slice of it.</param>
     /// <param name="destination">Where the file bytes go. Written strictly in order.</param>
     /// <param name="maxBytes">
@@ -31,12 +36,14 @@ internal sealed class ReconstructionWriter(XorbRangeFetcher fetcher, XetDownload
     /// file, since the check aggregates every chunk of it.
     /// </param>
     /// <param name="expectedSha256">The Hub's SHA-256 for the file, under the same whole-file condition.</param>
+    /// <param name="progress">Told how many bytes have reached the destination, if anyone is listening.</param>
     public async Task<XetDownloadResult> WriteAsync(
         FileReconstruction reconstruction,
         Stream destination,
         long? maxBytes = null,
         MerkleHash? expectedFileId = null,
         string? expectedSha256 = null,
+        IProgress<XetProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
         var plan = FetchPlan.Create(reconstruction, fetcher, options, cancellationToken);
@@ -47,6 +54,8 @@ internal sealed class ReconstructionWriter(XorbRangeFetcher fetcher, XetDownload
         var limit = maxBytes ?? long.MaxValue;
         var skipRemaining = reconstruction.OffsetIntoFirstRange;
         var written = 0L;
+        var reporter = new ProgressReporter(progress, Math.Min(limit, reconstruction.ContentLength));
+        _logger.ReconstructionPlanned(Math.Min(limit, reconstruction.ContentLength), reconstruction.Terms.Count, reconstruction.Xorbs.Count);
 
         try
         {
@@ -86,6 +95,7 @@ internal sealed class ReconstructionWriter(XorbRangeFetcher fetcher, XetDownload
                         sha256?.AppendData(chunk.Span);
                         await destination.WriteAsync(chunk, cancellationToken).ConfigureAwait(false);
                         written += chunk.Length;
+                        reporter.Advance(chunk.Length);
                     }
                 }
 
@@ -105,6 +115,8 @@ internal sealed class ReconstructionWriter(XorbRangeFetcher fetcher, XetDownload
         {
             plan.Dispose();
         }
+
+        reporter.Complete();
 
         var fileHash = Verify(chunkHashes, expectedFileId, sha256, expectedSha256);
         return new XetDownloadResult(written, fileHash, sha256 is null ? null : Convert.ToHexStringLower(sha256.GetCurrentHash()));

@@ -3,6 +3,9 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using XetSharp.Diagnostics;
 using XetSharp.Hub;
 using XetSharp.Json;
 using XetSharp.Shards;
@@ -27,6 +30,7 @@ public sealed class CasClient
 
     private readonly HttpClient _httpClient;
     private readonly IXetTokenSource _tokenSource;
+    private readonly ILogger _logger;
 
     /// <summary>
     /// The CAS origins observed not to serve <c>/v2/reconstructions</c>, so later files skip straight
@@ -39,12 +43,13 @@ public sealed class CasClient
     /// <summary>The same record for <c>/v2/shards</c>, which has its own <c>/v1</c> predecessor.</summary>
     private readonly ConcurrentDictionary<string, bool> _shardUploadV2Unavailable = new(StringComparer.OrdinalIgnoreCase);
 
-    public CasClient(HttpClient httpClient, IXetTokenSource tokenSource)
+    public CasClient(HttpClient httpClient, IXetTokenSource tokenSource, ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
         ArgumentNullException.ThrowIfNull(tokenSource);
         _httpClient = httpClient;
         _tokenSource = tokenSource;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <summary>
@@ -66,6 +71,7 @@ public sealed class CasClient
 
         if (!_reconstructionV2Unavailable.ContainsKey(OriginOf(token.CasUrl)))
         {
+            _logger.RequestingReconstruction("v2", fileId, range is { } wanted ? $", bytes {wanted}" : string.Empty);
             var (response, _) = await SendAsync(repository, ReconstructionRequest("v2", fileId, range), cancellationToken)
                 .ConfigureAwait(false);
             using (response)
@@ -80,12 +86,14 @@ public sealed class CasClient
             }
         }
 
+        _logger.RequestingReconstruction("v1", fileId, range is { } fallbackRange ? $", bytes {fallbackRange}" : string.Empty);
         var (fallback, fallbackToken) = await SendAsync(repository, ReconstructionRequest("v1", fileId, range), cancellationToken)
             .ConfigureAwait(false);
         using (fallback)
         {
             await EnsureSuccessAsync(fallback, $"Reconstruction of {fileId}", cancellationToken).ConfigureAwait(false);
             _reconstructionV2Unavailable[OriginOf(fallbackToken.CasUrl)] = true;
+            _logger.FallingBackToV1(OriginOf(fallbackToken.CasUrl), "reconstructions");
             return FileReconstruction.Parse(await ReadBodyAsync(fallback, cancellationToken).ConfigureAwait(false));
         }
     }
@@ -129,11 +137,13 @@ public sealed class CasClient
         {
             if (response.StatusCode == HttpStatusCode.NotFound)
             {
+                _logger.DeduplicationQueried("does not hold", chunkHash);
                 return null;
             }
 
             await EnsureSuccessAsync(response, $"Global-deduplication query for chunk {chunkHash}", cancellationToken)
                 .ConfigureAwait(false);
+            _logger.DeduplicationQueried("holds", chunkHash);
             return MdbShard.Parse(await ReadBodyAsync(response, cancellationToken).ConfigureAwait(false));
         }
     }
@@ -170,7 +180,9 @@ public sealed class CasClient
 
             // The status already said the xorb is stored; was_inserted only distinguishes storing it
             // now from having stored it before, so a body we cannot read is not worth failing over.
-            return TryDeserialize(body, XetJsonContext.Default.UploadXorbResponseJson)?.WasInserted ?? true;
+            var inserted = TryDeserialize(body, XetJsonContext.Default.UploadXorbResponseJson)?.WasInserted ?? true;
+            _logger.UploadedXorb(xorbHash, serializedXorb.Length, inserted ? "stored" : "already had");
+            return inserted;
         }
     }
 
@@ -217,7 +229,9 @@ public sealed class CasClient
                 if (response.StatusCode is not (HttpStatusCode.NotFound or HttpStatusCode.NotImplemented))
                 {
                     await EnsureSuccessAsync(response, "Shard upload", cancellationToken).ConfigureAwait(false);
-                    return await ReadShardUploadStreamAsync(response, cancellationToken).ConfigureAwait(false);
+                    var registered = await ReadShardUploadStreamAsync(response, cancellationToken).ConfigureAwait(false);
+                    _logger.UploadedShard(serializedShard.Length, registered ? "registered" : "already had");
+                    return registered;
                 }
             }
         }
@@ -232,9 +246,12 @@ public sealed class CasClient
         {
             await EnsureSuccessAsync(fallback, "Shard upload", cancellationToken).ConfigureAwait(false);
             _shardUploadV2Unavailable[OriginOf(fallbackToken.CasUrl)] = true;
+            _logger.FallingBackToV1(OriginOf(fallbackToken.CasUrl), "shards");
 
             var body = await ReadBodyAsync(fallback, cancellationToken).ConfigureAwait(false);
-            return TryDeserialize(body, XetJsonContext.Default.UploadShardResponseJson)?.Result != 0;
+            var registered = TryDeserialize(body, XetJsonContext.Default.UploadShardResponseJson)?.Result != 0;
+            _logger.UploadedShard(serializedShard.Length, registered ? "registered" : "already had");
+            return registered;
         }
     }
 

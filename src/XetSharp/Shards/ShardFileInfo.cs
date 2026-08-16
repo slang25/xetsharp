@@ -11,7 +11,7 @@ public sealed record ShardFileInfo(MerkleHash FileHash, IReadOnlyList<ShardFileT
     /// <summary>
     /// SHA-256 of the whole file, from the optional file-metadata record. REQUIRED when uploading
     /// to a Git-based Hub repo, whose LFS pointer references it; optional for storage buckets.
-    /// Its <see cref="MerkleHash.ToString"/> is the familiar SHA-256 hex — build one from a raw
+    /// Its <see cref="MerkleHash.ToString()"/> is the familiar SHA-256 hex — build one from a raw
     /// digest with <see cref="MerkleHash.FromHexOrder"/>.
     /// </summary>
     public MerkleHash? Sha256 { get; init; }

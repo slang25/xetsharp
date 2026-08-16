@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/XetSharp/XetSharp.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/XetSharp.Tests/XetSharp.Tests.csproj" />
+  </Folder>
+</Solution>

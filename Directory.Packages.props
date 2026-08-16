@@ -1,0 +1,8 @@
+<Project>
+
+  <ItemGroup>
+    <PackageVersion Include="Blake3" Version="3.0.2" />
+    <PackageVersion Include="TUnit" Version="1.65.0" />
+  </ItemGroup>
+
+</Project>

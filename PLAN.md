@@ -37,7 +37,7 @@ Three rings, in order of feedback speed:
 - **M2 — Formats** ✅ *(taken before M1: the download pipeline has to parse xorb chunk records anyway, so the pure format layer is the cheaper thing to nail down first)*: xorb serializer/reader with all three compression schemes; MDB shard reader/writer round-tripping all four published reference shards byte for byte; HMAC chunk matching for dedupe responses. 212 tests.
 - **M1 — Download** ✅: file-ID resolution off the resolve endpoint's redirect; a token cache that refreshes 30 s early and re-mints on a CAS `401`; `/v2/reconstructions` with `/v1` fallback; signed multi-range xorb fetches with a `multipart/byteranges` reader; ordered term assembly that decompresses chunk by chunk (so a term costs its *compressed* size in memory, not what it expands to) with bounded look-ahead prefetching; per-term `unpacked_length` checks plus whole-file hash and SHA-256 verification. 301 tests, four of them live against the Hub — the 63 MB reference file downloads and re-hashes to the file ID xet-core published for it.
 - **M3 — Upload** ✅: chunk → deduplicate (within the upload and against the global index, HMAC-keyed matching and all) → pack xorbs measured against the 64 MiB ceiling rather than estimated → upload them, bounded and concurrent → build one shard with per-term verification hashes and the SHA-256 a Git repo's LFS pointer needs → send it only once every xorb it names is stored. Plus the Hub commit that publishes the result. 363 tests: the upload round-trips through the download pipeline, and the 63 MB reference file produces the very shard xet-core uploaded for it, byte for byte.
-- **M4 — Performance & polish** 🚧: BenchmarkDotNet suites over every per-byte path (chunking, hashing, xorb serialization, shard writing) with a throughput column; `IProgress<XetProgress>` on every download and upload; `ILogger` at the token, request, xorb and transfer seams, silent unless a factory is handed in; `AddXetClient` in a separate `XetSharp.Extensions.DependencyInjection` package; NuGet packaging with SourceLink, symbols, XML docs and the README in the package. The gearhash loop was measured rather than optimised on faith, and the measurement said to leave it alone; the same measurement said to parallelize xorb packing, which is now done and made an uploaded byte **2.3x cheaper** — see below. 405 tests. Still open: transfer concurrency, which wants a real link rather than a stand-in service to judge.
+- **M4 — Performance & polish** ✅: BenchmarkDotNet suites over every per-byte path (chunking, hashing, xorb serialization, shard writing) with a throughput column; `IProgress<XetProgress>` on every download and upload; `ILogger` at the token, request, xorb and transfer seams, silent unless a factory is handed in; `AddXetClient` in a separate `XetSharp.Extensions.DependencyInjection` package; NuGet packaging with SourceLink, symbols, XML docs and the README in the package. The gearhash loop was measured rather than optimised on faith, and the measurement said to leave it alone; the same measurement said to parallelize xorb packing, which is now done and made an uploaded byte **2.3x cheaper** — see below. Transfer concurrency got the same treatment last: rather than tune it against a stand-in service, `sweep` downloads real bytes from the real Hub at each setting, and what it measured says to leave the defaults alone too — see below. 408 tests.
 
 ## Decisions taken (flag if you disagree)
 
@@ -184,15 +184,42 @@ scheduled onto an efficiency core reads about four times slower. All the figures
 `--inProcess` runs, where every case gets the same core class. This is written up in
 [benchmarks/README.md](benchmarks/README.md).
 
+### What the link said
+
+Transfer concurrency was the last M4 item, and the objection to settling it was that a stand-in CAS
+has neither of the two things concurrency exists to hide: the round trip before a range starts
+arriving, and whatever ceiling one connection runs into. So the measurement moved to the real thing.
+`dotnet run --project benchmarks/XetSharp.Benchmarks -c Release -- sweep` downloads the same public
+bytes once per `MaxConcurrentDownloads` setting, rounds interleaved, timed against a plain
+single-connection HTTP download of the same bytes as the link's own ceiling. No token, nothing
+written, no Rust — it is the only measurement here that needs a network.
+
+Two things came out of it, on 256 MiB of `openai-community/gpt2`'s weights over a domestic ~250
+Mbit/s link — full numbers in [benchmarks/README.md](benchmarks/README.md#measuring-a-real-link):
+
+- **The setting did not matter, because the link was already full.** Medians of 30, 30, 31 and 29
+  MB/s at 1, 2, 4 and 8, against 23–27 MB/s for one plain HTTP connection, and the spread between
+  rounds of the *same* setting reached 30%. One request in flight saturates a link this size. A
+  measurement that cannot separate 1 from 8 cannot justify building something to choose between
+  them, so **concurrency stays fixed** and adaptive tuning stays unwritten — the same answer, for the
+  same reason, as the gearhash loop. What has changed is that re-opening it now costs one command on
+  a fatter pipe rather than an argument.
+- **`MaxConcurrentDownloads` is not what bounds requests in flight for a large file —
+  `MaxBufferedBytes` is.** A file stored as full xorbs comes back in ~56 MB fetches, so the 128 MiB
+  budget holds two of them however high the count is set. That is the right trade — each extra
+  request in flight is another ~56 MB held in memory — but the option's name promised something it
+  does not deliver on its own, so both options now say so. `sweep --plan` prints the fetch sizes and
+  the resulting in-flight ceiling for any file, transferring nothing.
+
 ## Open questions for you
 
 - Package identity: publish as `XetSharp` on NuGet when ready? The projects are packable now — `dotnet pack -c Release` produces `XetSharp` and `XetSharp.Extensions.DependencyInjection`, both at `0.1.0` with symbols and SourceLink — but nothing publishes them. A release workflow (tag → pack → push) is a small job once you've decided on the identity and where the API key lives.
 - Any interest in a `netstandard2.0`/`net8.0` multi-target early (e.g. for use inside other tools), or is `net10.0`-only fine for now?
 - **Two packages or one?** `AddXetClient` lives in `XetSharp.Extensions.DependencyInjection` so the core library needs nothing from `Microsoft.Extensions.*` but the logging abstractions. The alternative — putting it in the main package — costs every consumer a dependency on `Microsoft.Extensions.Http` and everything under it. Easy to collapse into one package if you'd rather have the smaller matrix.
-- **Adaptive concurrency.** Still fixed (see below); the benchmark suite now exists to judge a change to it, but nothing here measures a real link, so this wants a decision rather than a measurement. Note this is *transfer* concurrency only — the CPU side is settled: `MaxCompressionParallelism` defaults to 4 off a measured curve.
+- **Adaptive concurrency — measured, and left fixed.** `sweep` now runs against the real Hub, and on a ~250 Mbit/s link every setting from 1 to 8 lands inside the noise, because one request already fills the link (see *What the link said*). That is an answer, but it is an answer from the wrong link: it says nothing about a machine with 10 Gbit to the CDN, which is where adaptive tuning would earn its keep. Worth running `sweep` from a cloud VM before deciding, or happy to close it as done?
 - **How many of a host's cores should a library take by default?** Packing now uses four threads unless told otherwise, which is the fastest setting for a process doing nothing else and an opinion imposed on a process that is. The alternatives are 1 (fastest is opt-in), `ProcessorCount` (fastest by default, rudest), or reading it off the number of files being uploaded. Happy to change it — this is the only place XetSharp spends cores it was not explicitly given.
 - The shard footer fields above are undocumented; I've surfaced the byte-count totals on `ShardFooter` so shards round-trip, and reject shards carrying lookup tables (which this library never writes). Happy to make that lenient instead if you'd rather parse everything xet-core can emit.
-- Concurrency is currently fixed (`MaxConcurrentDownloads = 8`, a 128 MiB prefetch budget, `MaxConcurrentUploads = 4`). xet-core scales it adaptively with observed bandwidth. It is the one M4 item left undone: tuning it against a stand-in service measures the stand-in, and I would rather set it against a real link than against `FakeCas`.
+- **The upload side of that measurement has no oracle at all.** `MaxConcurrentUploads = 4` was never measured, and cannot be without somewhere to write — `sweep` is download-only because a public repo is readable and nothing is writable. If the scratch repository below appears, the same treatment is a small addition to the same tool.
 - **Salted repositories vs. file-hash verification.** A file hash is finalized with a repository salt, and nothing on the download path tells us what that salt is — the token and reconstruction responses carry no such field. Verification therefore assumes the default zero salt, which is right for everything I can test against (the reference file verifies). If salted repos exist in the wild, they'd fail verification with intact data. Options: leave it on and let the (explicit) error explain, or default `VerifyFileHash` to off. I've left it on.
 - **A scratch repository to point the live upload tests at.** Everything above the commit is verified offline; the commit is not verified at all. If you make (or name) a throwaway repo with write access from your Hub token, `XETSHARP_LIVE_UPLOAD_REPO=you/xetsharp-scratch dotnet run --project tests/XetSharp.Tests` settles all three of the open items in one run.
 - **Term fragmentation on deduplication.** A global-dedupe hit is taken wherever it lands, even for a single chunk, which can leave a reconstruction with many short terms — and a download pays per term. xet-core targets an average of 8 chunks per term and declines matches shorter than that. Worth adding a minimum-run rule, or leave it greedy until a benchmark says otherwise?

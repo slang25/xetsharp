@@ -1,7 +1,9 @@
 # Benchmarks
 
 [BenchmarkDotNet](https://benchmarkdotnet.org) suites for the parts of the client that do work per
-byte. Everything here runs offline against generated data — no Hub, no network.
+byte. Every suite runs offline against generated data — no Hub, no network. The one exception is the
+[transfer sweep](#measuring-a-real-link), which is not a BenchmarkDotNet suite at all: it measures a
+network, and there is nothing offline for it to measure.
 
 ```sh
 dotnet run --project benchmarks/XetSharp.Benchmarks -c Release -- --filter '*'
@@ -46,6 +48,54 @@ enough iterations to average the interference out:
 dotnet run --project benchmarks/XetSharp.Benchmarks -c Release -- \
   --filter '*Packing*' --inProcess --warmupCount 3 --iterationCount 15 --invocationCount 1 --unrollFactor 1
 ```
+
+## Measuring a real link
+
+`sweep` is the odd one out: it downloads the same bytes from the real Hub several times over, once
+per `MaxConcurrentDownloads` setting, and prints what each one achieved. Transfer concurrency is
+there to hide two things a stand-in service does not have — the round trip before a range starts
+arriving, and whatever ceiling one connection runs into — so tuning it against `FakeCas` would
+measure `FakeCas`. Everything it reads is public: no token, and nothing is written.
+
+```sh
+# What the download would look like, without transferring anything.
+dotnet run --project benchmarks/XetSharp.Benchmarks -c Release -- sweep --plan
+
+# The sweep itself: 256 MiB of gpt2's weights per run, four settings, three interleaved rounds.
+dotnet run --project benchmarks/XetSharp.Benchmarks -c Release -- sweep \
+  --bytes 256 --concurrency 1,2,4,8 --buffer 1024 --rounds 3
+```
+
+`--plan` is worth running first, because it prints the thing that decides whether a sweep can say
+anything at all: how many fetches the range breaks into and how big they are. A file stored as full
+xorbs comes back as ~56 MB fetches, and 256 MiB of it is only five of them — so a setting of 8 has
+nothing to be 8 of. It also prints how many of those fit in `MaxBufferedBytes`, which is what
+actually bounds the requests in flight: at the shipping 128 MiB budget, two.
+
+Rounds are interleaved rather than run setting by setting, so a link that slows down halfway through
+spreads the damage instead of condemning one setting. Each client warms up untimed first, to keep
+its token mint and connection setup out of the numbers. A single plain HTTP download of the same
+bytes is timed alongside, as the link's own ceiling.
+
+### What it said here
+
+On a domestic link that tops out around 250 Mbit/s, 256 MiB of `openai-community/gpt2`'s
+`model.safetensors`, three rounds per setting:
+
+| MaxConcurrentDownloads | 1 | 2 | 4 | 8 |
+| --- | --- | --- | --- | --- |
+| median MB/s, 1024 MiB buffer | 30 | 30 | 31 | 29 |
+| median MB/s, 128 MiB buffer (the default) | 23 | — | — | 30 |
+
+One plain HTTP connection managed 23–27 MB/s over the same bytes, and no run of any setting left the
+21–33 MB/s band. **This link is the ceiling, and one request in flight already reaches it** — which
+is a real answer to "should the client ramp concurrency up and down", just not the interesting one.
+A measurement that cannot separate 1 from 8 cannot justify building something to choose between
+them, so the fixed defaults stay, and the tool is here for whoever next runs it somewhere with a
+fatter pipe (a cloud VM in the same region as the CDN would settle it in a minute).
+
+Treat one run as noise: the spread between rounds of the *same* setting reached 30% here, which is
+larger than any difference between settings.
 
 ## Comparing with hf_xet
 

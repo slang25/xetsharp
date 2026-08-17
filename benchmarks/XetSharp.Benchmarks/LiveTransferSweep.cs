@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Net;
 using System.Net.Http.Headers;
 using XetSharp.Cas;
 using XetSharp.Download;
@@ -53,8 +54,17 @@ internal static class LiveTransferSweep
         var file = await probe.GetFileInfoAsync(repository, options.Path).ConfigureAwait(false);
 
         // Staying short of the whole file keeps this a range download, which skips the file-hash and
-        // SHA-256 checks — they are real work, but they are not what is being compared here.
-        var length = file.Size > 0 ? Math.Min(options.Bytes, file.Size - 1) : options.Bytes;
+        // SHA-256 checks — they are real work, but they are not what is being compared here. A file
+        // of fewer than two bytes leaves no range short of the whole file, so there is nothing to time.
+        if (file.Size < 2)
+        {
+            Console.Error.WriteLine(
+                $"{repository.Id}/{options.Path} is {file.Size:N0} bytes; the sweep needs at least 2 " +
+                $"so it can stay short of the whole file. Pick a larger file with --file.");
+            return 1;
+        }
+
+        var length = Math.Min(options.Bytes, file.Size - 1);
         var reconstruction = await probe.Cas
             .GetReconstructionAsync(repository, file.FileId, new ByteRange(0, length - 1))
             .ConfigureAwait(false);
@@ -67,7 +77,7 @@ internal static class LiveTransferSweep
 
         Console.WriteLine();
         Console.WriteLine($"Baseline: one plain HTTP connection to the Hub's ordinary download route.");
-        var baseline = await TimePlainHttpAsync(repository, options.Path, length).ConfigureAwait(false);
+        var baseline = await TimePlainHttpAsync(probe.Hub.ResolveUri(repository, options.Path), length).ConfigureAwait(false);
         Console.WriteLine($"  {baseline:N0} MB/s");
         Console.WriteLine();
 
@@ -187,24 +197,64 @@ internal static class LiveTransferSweep
     }
 
     /// <summary>The same bytes over the Hub's non-Xet route, on one connection: what the link can do.</summary>
-    private static async Task<double> TimePlainHttpAsync(XetRepository repository, string path, long length)
+    private static async Task<double> TimePlainHttpAsync(Uri url, long length)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
-        var url = $"https://huggingface.co/{repository.ResolvePrefix}{repository.Id}/resolve/{repository.Revision}/{path}";
+
+        // Untimed, and for the same reason the Xet clients get one: this walks the redirect to the
+        // CDN and leaves DNS, TCP and TLS to that host already paid for, which is what every timed
+        // Xet run enjoys. Without it the baseline carries connection setup the others do not.
+        await ReadRangeAsync(http, url, Math.Min(length, 1L * 1024 * 1024)).ConfigureAwait(false);
+
+        var stopwatch = Stopwatch.StartNew();
+        await ReadRangeAsync(http, url, length).ConfigureAwait(false);
+        stopwatch.Stop();
+
+        return length / 1e6 / stopwatch.Elapsed.TotalSeconds;
+    }
+
+    private static async Task ReadRangeAsync(HttpClient http, Uri url, long length)
+    {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Range = new RangeHeaderValue(0, length - 1);
 
-        var stopwatch = Stopwatch.StartNew();
         using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
-        var body = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-        await using (body.ConfigureAwait(false))
+
+        // A server is free to ignore Range and hand back the whole file with a 200. That would be a
+        // different measurement dressed up as this one — more bytes over the wire than the throughput
+        // is divided by — so refuse it rather than report it.
+        if (response.StatusCode != HttpStatusCode.PartialContent)
         {
-            await body.CopyToAsync(Stream.Null).ConfigureAwait(false);
+            throw new InvalidOperationException(
+                $"The ordinary download route ignored Range and answered {(int)response.StatusCode} " +
+                $"{response.StatusCode}; there is no comparable baseline over these bytes.");
         }
 
-        stopwatch.Stop();
-        return length / 1e6 / stopwatch.Elapsed.TotalSeconds;
+        var body = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        long read;
+        await using (body.ConfigureAwait(false))
+        {
+            read = await CopyCountingAsync(body).ConfigureAwait(false);
+        }
+
+        if (read != length)
+        {
+            throw new InvalidOperationException($"Expected {length} bytes from the ordinary route, got {read}.");
+        }
+    }
+
+    private static async Task<long> CopyCountingAsync(Stream source)
+    {
+        var buffer = new byte[128 * 1024];
+        long total = 0;
+        int read;
+        while ((read = await source.ReadAsync(buffer).ConfigureAwait(false)) > 0)
+        {
+            total += read;
+        }
+
+        return total;
     }
 
     private static double Median(List<double> values)
@@ -273,7 +323,9 @@ internal static class LiveTransferSweep
                         options = options with { Rounds = ParseCount(Next(args, ref i)) };
                         continue;
                     case "--concurrency":
-                        options = options with { Concurrency = [.. Next(args, ref i).Split(',').Select(ParseCount)] };
+                        // Distinct: a repeated setting would otherwise be built twice, leaking the
+                        // first client and timing that setting twice per round into one median.
+                        options = options with { Concurrency = [.. Next(args, ref i).Split(',').Select(ParseCount).Distinct()] };
                         continue;
                     default:
                         throw new ArgumentException($"Unknown option '{args[i]}'.");

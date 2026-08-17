@@ -26,7 +26,17 @@ internal sealed record PackedXorb(MerkleHash Hash, byte[] Serialized, ShardCasIn
 /// A bounded window of chunks is in flight at a time, so packing holds a few chunks' worth of
 /// memory rather than the whole xorb's.
 /// </remarks>
-internal sealed class XorbBuilder(int maxUncompressedBytes, int compressionParallelism = 1) : IDisposable
+/// <param name="compressAsync">
+/// How a chunk is compressed once it has been handed off. Defaults to the thread pool, which is the
+/// only thing production uses it for; tests substitute a delegate that counts how many compressions
+/// are in flight, since the window this class keeps is a contract and not just a performance knob.
+/// Unused when compression runs inline, which is to say when <paramref name="compressionParallelism"/>
+/// is one and there is no window to bound.
+/// </param>
+internal sealed class XorbBuilder(
+    int maxUncompressedBytes,
+    int compressionParallelism = 1,
+    Func<ReadOnlyMemory<byte>, Task<CompressedChunk>>? compressAsync = null) : IDisposable
 {
     /// <summary>
     /// The most chunks packed into one xorb. The protocol sets no limit; this one exists so that
@@ -64,6 +74,9 @@ internal sealed class XorbBuilder(int maxUncompressedBytes, int compressionParal
     /// many run together, and one that keeps n of them busy.
     /// </summary>
     private readonly int _maxInFlight = compressionParallelism;
+
+    private readonly Func<ReadOnlyMemory<byte>, Task<CompressedChunk>> _compressAsync =
+        compressAsync ?? (chunk => Task.Run(() => XorbSerializer.CompressChunk(chunk.Span), CancellationToken.None));
 
     private uint _uncompressedBytes;
 
@@ -112,7 +125,7 @@ internal sealed class XorbBuilder(int maxUncompressedBytes, int compressionParal
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        _inFlight.Enqueue((chunk, Task.Run(() => XorbSerializer.CompressChunk(chunk.Span), CancellationToken.None)));
+        _inFlight.Enqueue((chunk, _compressAsync(chunk)));
         return index;
     }
 

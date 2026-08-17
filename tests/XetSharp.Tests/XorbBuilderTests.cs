@@ -140,6 +140,84 @@ public class XorbBuilderTests
     }
 
     /// <summary>
+    /// The other half of the parallel path's contract, and the half byte-identity cannot see: the
+    /// setting is a cap on how many chunks compress at once, so a window that let twice that many run
+    /// would produce exactly the same xorb while taking twice the cores it was allowed. Compression is
+    /// replaced with a delegate that holds every chunk until the test lets it go, so the builder is
+    /// pushed against its window rather than raced against it and the count it reaches is the count it
+    /// permits, not whatever the thread pool happened to start.
+    /// </summary>
+    [Test]
+    [Arguments(2)]
+    [Arguments(3)]
+    [Arguments(4)]
+    public async Task Compresses_no_more_chunks_at_once_than_it_was_told_to(int parallelism)
+    {
+        var sync = new Lock();
+        var inFlight = 0;
+        var peak = 0;
+        var started = new SemaphoreSlim(0);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // Compresses on the calling thread and only then waits, so what the counter measures is the
+        // builder's window and never the thread pool's willingness to run the work.
+        Task<CompressedChunk> CompressAsync(ReadOnlyMemory<byte> chunk)
+        {
+            lock (sync)
+            {
+                peak = Math.Max(peak, ++inFlight);
+            }
+
+            started.Release();
+            return HoldAsync(XorbSerializer.CompressChunk(chunk.Span));
+        }
+
+        async Task<CompressedChunk> HoldAsync(CompressedChunk compressed)
+        {
+            await release.Task;
+            lock (sync)
+            {
+                inFlight--;
+            }
+
+            return compressed;
+        }
+
+        var chunks = MixedChunks();
+        using var builder = new XorbBuilder(XorbBuilder.MaxUncompressedBytes, parallelism, CompressAsync);
+        var packing = Task.Run(async () =>
+        {
+            foreach (var chunk in chunks)
+            {
+                await builder.AddAsync(chunk, XetHashes.ChunkHash(chunk));
+            }
+
+            return await builder.BuildAsync();
+        });
+
+        var startedWithinWindow = 0;
+        while (startedWithinWindow < parallelism && await started.WaitAsync(TimeSpan.FromSeconds(30)))
+        {
+            startedWithinWindow++;
+        }
+
+        // The window is full and nothing has been appended, so a builder that respects it cannot have
+        // started another chunk — and one that does not will have started it long before this elapses.
+        // Observed before anything is asserted: an assertion that threw here would leave the delegates
+        // waiting on a gate nobody opens, and disposing the builder waits on them in turn.
+        var startedBeyondWindow = await started.WaitAsync(TimeSpan.FromMilliseconds(250));
+
+        release.SetResult();
+        var packed = await packing;
+
+        await Assert.That(startedWithinWindow).IsEqualTo(parallelism);
+        await Assert.That(startedBeyondWindow).IsFalse();
+        await Assert.That(peak).IsEqualTo(parallelism);
+        await Assert.That(packed.Serialized).IsEquivalentTo(
+            (await PackAsync(chunks, 1)).Serialized, CollectionOrdering.Matching);
+    }
+
+    /// <summary>
     /// A chunk still compressing when a xorb is sealed has to be waited for, not dropped: the danger
     /// with a bounded window is a xorb that seals with its last few records missing.
     /// </summary>

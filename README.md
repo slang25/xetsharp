@@ -57,10 +57,11 @@ service's global index, packed into xorbs and registered with a shard — and th
 LFS pointer, which is what makes a Git-backed repository show it. Storing the bytes and committing
 them are separate steps, so `UploadAsync` and `CommitAsync` are available on their own.
 
-Most of what an upload costs in CPU is compressing chunks, so four of them compress at once by
-default and the packed xorb is assembled in the order the chunks were added — the same bytes a
-single-threaded pack would produce, about 2.3x sooner. `XetUploadOptions.MaxCompressionParallelism`
-sets the number; 1 keeps the thread pool out of it entirely.
+Most of what an upload costs in CPU is compressing chunks, so up to four of them compress at once by
+default — one per processor, never more than four — and the packed xorb is assembled in the order the
+chunks were added, the same bytes a single-threaded pack would produce, about 2.3x sooner.
+`XetUploadOptions.MaxCompressionParallelism` sets the number; 1 keeps the thread pool out of it
+entirely.
 
 Uploading several files at once packs their chunks together and publishes them in one commit:
 

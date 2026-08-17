@@ -14,6 +14,11 @@ internal static class ChunkCompression
     /// Frame settings chosen to match the reference implementation's output shape: independent
     /// blocks, no checksums, and a block size large enough that any legal chunk is a single block.
     /// </summary>
+    /// <remarks>
+    /// Shared by every thread packing a xorb. <c>LZ4Frame.Encode</c> only reads its settings — it
+    /// builds a fresh encoder and descriptor per call, and shares a static settings instance itself
+    /// when none is passed — so one instance is safe as long as nothing here mutates it.
+    /// </remarks>
     private static readonly LZ4EncoderSettings EncoderSettings = new()
     {
         ChainBlocks = false,

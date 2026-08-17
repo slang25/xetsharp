@@ -37,7 +37,7 @@ Three rings, in order of feedback speed:
 - **M2 — Formats** ✅ *(taken before M1: the download pipeline has to parse xorb chunk records anyway, so the pure format layer is the cheaper thing to nail down first)*: xorb serializer/reader with all three compression schemes; MDB shard reader/writer round-tripping all four published reference shards byte for byte; HMAC chunk matching for dedupe responses. 212 tests.
 - **M1 — Download** ✅: file-ID resolution off the resolve endpoint's redirect; a token cache that refreshes 30 s early and re-mints on a CAS `401`; `/v2/reconstructions` with `/v1` fallback; signed multi-range xorb fetches with a `multipart/byteranges` reader; ordered term assembly that decompresses chunk by chunk (so a term costs its *compressed* size in memory, not what it expands to) with bounded look-ahead prefetching; per-term `unpacked_length` checks plus whole-file hash and SHA-256 verification. 301 tests, four of them live against the Hub — the 63 MB reference file downloads and re-hashes to the file ID xet-core published for it.
 - **M3 — Upload** ✅: chunk → deduplicate (within the upload and against the global index, HMAC-keyed matching and all) → pack xorbs measured against the 64 MiB ceiling rather than estimated → upload them, bounded and concurrent → build one shard with per-term verification hashes and the SHA-256 a Git repo's LFS pointer needs → send it only once every xorb it names is stored. Plus the Hub commit that publishes the result. 363 tests: the upload round-trips through the download pipeline, and the 63 MB reference file produces the very shard xet-core uploaded for it, byte for byte.
-- **M4 — Performance & polish** 🚧: BenchmarkDotNet suites over every per-byte path (chunking, hashing, xorb serialization, shard writing) with a throughput column; `IProgress<XetProgress>` on every download and upload; `ILogger` at the token, request, xorb and transfer seams, silent unless a factory is handed in; `AddXetClient` in a separate `XetSharp.Extensions.DependencyInjection` package; NuGet packaging with SourceLink, symbols, XML docs and the README in the package. The gearhash loop was measured rather than optimised on faith, and the measurement said to leave it alone — see below. 394 tests. Still open: parallelism tuning, which wants a real link rather than a stand-in service to judge.
+- **M4 — Performance & polish** 🚧: BenchmarkDotNet suites over every per-byte path (chunking, hashing, xorb serialization, shard writing) with a throughput column; `IProgress<XetProgress>` on every download and upload; `ILogger` at the token, request, xorb and transfer seams, silent unless a factory is handed in; `AddXetClient` in a separate `XetSharp.Extensions.DependencyInjection` package; NuGet packaging with SourceLink, symbols, XML docs and the README in the package. The gearhash loop was measured rather than optimised on faith, and the measurement said to leave it alone; the same measurement said to parallelize xorb packing, which is now done and made an uploaded byte **2.3x cheaper** — see below. 405 tests. Still open: transfer concurrency, which wants a real link rather than a stand-in service to judge.
 
 ## Decisions taken (flag if you disagree)
 
@@ -55,6 +55,12 @@ Three rings, in order of feedback speed:
 - **Upload takes a batch of files and writes one shard.** Chunks pack across file boundaries, as the spec recommends, and one commit publishes the lot. A batch describing more than a 64 MiB shard throws rather than splitting — at 48 bytes per chunk record that is around 85 GB of data, past anything the Hub accepts as a single file, so splitting can wait until something needs it.
 - **Uploading and committing are separate calls.** `UploadAsync` stores and registers the bytes — the whole of the Xet protocol's job. `CommitAsync` writes the LFS pointer that makes a Git-backed repository show the file, which is the Hub's own API and not in the Xet spec at all. `UploadAndCommitAsync` does both for the common case.
 - **No on-disk dedup cache.** xet-core keeps shards on disk and dedupes against them across runs; the spec makes that optional. Deduplication here is per upload plus the global index.
+- **Chunks compress in parallel; the xorb is assembled in order.** `MaxCompressionParallelism`
+  (default 4, or the core count if lower) is a cap on how many chunks are *outstanding*, enforced by
+  refusing the next chunk until the oldest is appended — so it is a true cap on how many run at once,
+  not a queue depth the thread pool is free to widen. Getting that wrong the first time made two
+  workers look 3.6x faster than one, which is how a benchmark tells you your option does not mean
+  what its name says. Setting it to 1 keeps the thread pool out of the packer entirely.
 - **Progress is a parameter, not an option.** `IProgress<XetProgress>` is passed per call rather than set on `XetClientOptions`, because a progress bar belongs to one transfer and the options object is shared by every transfer a client makes. Reports come about once a megabyte plus one at the end, counted in bytes rather than on a clock so a test sees the same reports every run.
 - **`TotalBytes` is null rather than guessed.** An upload only reports a total when *every* file in the batch can say how long it is; one unmeasurable stream in a batch makes the whole total null. A bar that jumps backwards is worse than no bar.
 - **The library depends on `Microsoft.Extensions.Logging.Abstractions` and nothing else from that family.** Logging abstractions are effectively part of the platform and cost a consumer nothing when unused; DI and `IHttpClientFactory` are a separate `XetSharp.Extensions.DependencyInjection` package, so a console tool that news up a `XetClient` pulls in none of it.
@@ -120,9 +126,33 @@ is the only stage that is nowhere near memory speed. Every chunk is compressed t
 byte-grouped LZ4 — because the format stores whichever came out smaller, and on the compressible
 data this client exists to move, the byte-grouped attempt is the expensive one. Choosing between the
 two more cheaply is not available: which scheme wins is part of what makes a xorb byte-identical to
-the reference implementation's. Doing the two attempts (or whole chunks) in parallel is, and would
-not change a single output byte — packing is single-threaded today. That is the next thing worth
-doing, and it is a change to `XorbBuilder` and the upload loop rather than to any hot loop.
+the reference implementation's. Compressing several chunks at once is, and it changes no output
+byte, so that is what M4 did.
+
+### What parallel packing bought
+
+`XorbBuilder` now hands each chunk's compression to the thread pool and appends the results **in the
+order the chunks were added**, never the order they finished, with at most
+`MaxCompressionParallelism` of them outstanding at a time. Same bytes, same hash, same object in the
+CAS — the reference file still packs into the very shard xet-core published for it, and the whole
+796-chunk file now packs identically at one worker and at four.
+
+Per-degree, on the same M-series Mac (`--inProcess`, 15 iterations — see the note in
+[benchmarks/README.md](benchmarks/README.md) about what a loaded machine does to this suite):
+
+| Workers | Compression alone | + chunk hashing | + chunking (the whole upload CPU path) |
+| --- | --- | --- | --- |
+| 1 | 219 MB/s | 200 MB/s | **187 MB/s** |
+| 2 | 444 MB/s | 420 MB/s | 294 MB/s |
+| 4 | 851 MB/s | 820 MB/s | **423 MB/s** |
+| 8 | 1,303 MB/s | 954 MB/s | 434 MB/s |
+
+Two things fall out of the third column, which is the one that matters. It **flattens at four**, so
+that is the default — past four the extra threads take cores from the rest of the process for about
+2%. And what they are now waiting on is the calling thread: chunking, hashing and the read, which
+this does not parallelize. The 32 MB of per-chunk arrays a 32 MiB buffer allocates, noted below as
+the chunker's remaining cost, is a much more interesting number than it was when compression was
+five times more expensive than everything around it.
 
 The plan also called for a "SIMD-friendly gearhash inner loop". Measuring it first turned that into a
 decision not to write one.
@@ -143,8 +173,11 @@ decision not to write one.
 - Chunking a 32 MiB buffer allocates 32 MB: one array per chunk. That, not the hash loop, is the
   chunker's remaining cost, and removing it means handing chunks out as spans into the caller's read
   buffer — which the upload pipeline cannot use as it stands, because it awaits a deduplication
-  query per chunk and a span cannot cross an `await`. Left alone deliberately; it needs the upload
-  loop restructured, not the chunker.
+  query per chunk and a span cannot cross an `await`. Parallel packing has since given the same
+  answer a second reason: a chunk is now read by a thread-pool worker after `AddAsync` returns, so
+  its memory has to outlive the call whatever the chunker hands over. Left alone deliberately; it
+  needs the upload loop restructured, not the chunker — and the restructuring would have to hand out
+  slices of a buffer nobody overwrites until the xorb is sealed.
 
 On an Apple Silicon Mac, BenchmarkDotNet's process-per-case model makes results bimodal — a case
 scheduled onto an efficiency core reads about four times slower. All the figures above come from
@@ -156,7 +189,8 @@ scheduled onto an efficiency core reads about four times slower. All the figures
 - Package identity: publish as `XetSharp` on NuGet when ready? The projects are packable now — `dotnet pack -c Release` produces `XetSharp` and `XetSharp.Extensions.DependencyInjection`, both at `0.1.0` with symbols and SourceLink — but nothing publishes them. A release workflow (tag → pack → push) is a small job once you've decided on the identity and where the API key lives.
 - Any interest in a `netstandard2.0`/`net8.0` multi-target early (e.g. for use inside other tools), or is `net10.0`-only fine for now?
 - **Two packages or one?** `AddXetClient` lives in `XetSharp.Extensions.DependencyInjection` so the core library needs nothing from `Microsoft.Extensions.*` but the logging abstractions. The alternative — putting it in the main package — costs every consumer a dependency on `Microsoft.Extensions.Http` and everything under it. Easy to collapse into one package if you'd rather have the smaller matrix.
-- **Adaptive concurrency.** Still fixed (see below); the benchmark suite now exists to judge a change to it, but nothing here measures a real link, so this wants a decision rather than a measurement.
+- **Adaptive concurrency.** Still fixed (see below); the benchmark suite now exists to judge a change to it, but nothing here measures a real link, so this wants a decision rather than a measurement. Note this is *transfer* concurrency only — the CPU side is settled: `MaxCompressionParallelism` defaults to 4 off a measured curve.
+- **How many of a host's cores should a library take by default?** Packing now uses four threads unless told otherwise, which is the fastest setting for a process doing nothing else and an opinion imposed on a process that is. The alternatives are 1 (fastest is opt-in), `ProcessorCount` (fastest by default, rudest), or reading it off the number of files being uploaded. Happy to change it — this is the only place XetSharp spends cores it was not explicitly given.
 - The shard footer fields above are undocumented; I've surfaced the byte-count totals on `ShardFooter` so shards round-trip, and reject shards carrying lookup tables (which this library never writes). Happy to make that lenient instead if you'd rather parse everything xet-core can emit.
 - Concurrency is currently fixed (`MaxConcurrentDownloads = 8`, a 128 MiB prefetch budget, `MaxConcurrentUploads = 4`). xet-core scales it adaptively with observed bandwidth. It is the one M4 item left undone: tuning it against a stand-in service measures the stand-in, and I would rather set it against a real link than against `FakeCas`.
 - **Salted repositories vs. file-hash verification.** A file hash is finalized with a repository salt, and nothing on the download path tells us what that salt is — the token and reconstruction responses carry no such field. Verification therefore assumes the default zero salt, which is right for everything I can test against (the reference file verifies). If salted repos exist in the wild, they'd fail verification with intact data. Options: leave it on and let the (explicit) error explain, or default `VerifyFileHash` to off. I've left it on.

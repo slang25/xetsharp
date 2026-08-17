@@ -29,6 +29,22 @@ public sealed record XetUploadOptions
     public int ReadBufferSize { get; init; } = 4 * 1024 * 1024;
 
     /// <summary>
+    /// How many chunks may be compressed at once while a xorb is packed. Compressing them is what an
+    /// upload spends most of its CPU time on — several times what chunking and hashing cost together,
+    /// since every chunk is compressed twice so the smaller result can be kept — and each chunk is
+    /// independent of the others, so this is where the parallelism goes. One compresses inline.
+    /// </summary>
+    /// <remarks>
+    /// The xorb comes out byte-identical whatever this is set to: chunks are appended in the order
+    /// they were added, not the order they finished. Four is where the measured curve flattens —
+    /// chunking, hashing and reading stay on the calling thread, and past four workers they are what
+    /// the pipeline waits for, so the extra threads only take cores from whatever else is running
+    /// (<c>PackingBenchmarks</c>: 187 MB/s at one, 423 at four, 434 at eight). One turns the thread
+    /// pool out of the packer altogether, for a caller who would rather keep its cores.
+    /// </remarks>
+    public int MaxCompressionParallelism { get; init; } = Math.Min(Environment.ProcessorCount, 4);
+
+    /// <summary>
     /// The sampling rate for global-deduplication queries. Internal because
     /// <see cref="DefaultGlobalDeduplicationSampleRate"/> is the value that keeps this client asking
     /// the same questions as the reference implementation; tests lower it so a query is certain
@@ -47,6 +63,7 @@ public sealed record XetUploadOptions
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxConcurrentUploads, 1, nameof(MaxConcurrentUploads));
         ArgumentOutOfRangeException.ThrowIfLessThan(ReadBufferSize, 4096, nameof(ReadBufferSize));
+        ArgumentOutOfRangeException.ThrowIfLessThan(MaxCompressionParallelism, 1, nameof(MaxCompressionParallelism));
         ArgumentOutOfRangeException.ThrowIfLessThan(GlobalDeduplicationSampleRate, 1ul, nameof(GlobalDeduplicationSampleRate));
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxXorbBytes, Xorbs.XorbChunkHeader.MaxUncompressedSize, nameof(MaxXorbBytes));
         ArgumentOutOfRangeException.ThrowIfGreaterThan(MaxXorbBytes, XorbBuilder.MaxUncompressedBytes, nameof(MaxXorbBytes));

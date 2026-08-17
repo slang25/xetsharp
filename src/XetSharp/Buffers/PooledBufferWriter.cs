@@ -39,6 +39,19 @@ internal sealed class PooledBufferWriter : IBufferWriter<byte>, IDisposable
 
     public void Reset() => _written = 0;
 
+    /// <summary>
+    /// Hands the pooled array over to the caller, who becomes responsible for returning it, and
+    /// leaves this writer empty — so a <c>using</c> around it turns into a no-op. Lets a compressed
+    /// chunk outlive the writer it was compressed into without copying it out.
+    /// </summary>
+    public byte[] Detach()
+    {
+        var buffer = _buffer;
+        _buffer = [];
+        _written = 0;
+        return buffer;
+    }
+
     public void Dispose()
     {
         if (_buffer.Length > 0)

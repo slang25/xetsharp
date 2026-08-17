@@ -102,6 +102,36 @@ public class FullReferenceDatasetTests
     }
 
     /// <summary>
+    /// Packing the real file's 796 chunks with four of them compressing at once has to produce the
+    /// same xorb, byte for byte, as packing them one at a time. The synthetic version of this check
+    /// lives in <see cref="XorbBuilderTests"/>; this one runs it over data whose chunks vary in size
+    /// and in which compression scheme wins, which is where a misplaced record would hide.
+    /// </summary>
+    [Test]
+    [SkipWithoutReferenceDataset]
+    public async Task Packs_the_real_file_identically_however_many_chunks_compress_at_once()
+    {
+        var chunks = Chunker.ChunkAll(SkipWithoutReferenceDatasetAttribute.Read(CsvFileName));
+
+        var serial = await PackAsync(chunks, 1);
+        var parallel = await PackAsync(chunks, 4);
+
+        await Assert.That(parallel.Hash.ToString()).IsEqualTo(ReferenceFiles.XorbHash);
+        await Assert.That(parallel.Serialized).IsEquivalentTo(serial.Serialized, CollectionOrdering.Matching);
+    }
+
+    private static async Task<PackedXorb> PackAsync(List<byte[]> chunks, int parallelism)
+    {
+        using var builder = new XorbBuilder(XorbBuilder.MaxUncompressedBytes, parallelism);
+        foreach (var chunk in chunks)
+        {
+            await builder.AddAsync(chunk, XetHashes.ChunkHash(chunk));
+        }
+
+        return await builder.BuildAsync();
+    }
+
+    /// <summary>
     /// The xorb the upload produced holds the reference file's chunks, in order, undamaged — but is
     /// not the reference implementation's bytes. Nothing requires it to be: a xorb is addressed by
     /// the hash of its chunks, which the shard comparison above already pins, and the compression

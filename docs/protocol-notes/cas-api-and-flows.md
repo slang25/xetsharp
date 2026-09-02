@@ -649,3 +649,40 @@ file's path, size and a base64 sample of its first bytes, and is told back an `u
 all. XetSharp does not call it: it would be a second endpoint taken from a client rather than a
 spec, and the commit above does not document a dependency on it. If a live commit turns out to need
 the preupload call first, this is the first place to look.
+
+---
+
+## 10. What building a server adds
+
+Running the official Python client (`huggingface_hub` 1.29 with the Rust `hf_xet` engine) against
+XetSharp's own server turned up three things a server has to know that the spec pages do not say.
+All are pinned by `tests/XetSharp.Server.Tests/PythonInteropTests.cs`.
+
+### 10.1 The reference client queries global dedupe under the `default` prefix
+
+§4.2 says `prefix` MUST be `default-merkledb`. `hf_xet` sends
+`GET /v1/chunks/default/{chunk_hash}`. A server that enforces the spec's wording answers 400 and
+the client treats that as a miss, so deduplication silently stops working. XetSharp's server
+accepts both; XetSharp's client keeps sending `default-merkledb`, which the public service accepts.
+
+### 10.2 The Python client reads the token from headers, not the body
+
+`huggingface_hub` fetches the `rel="xet-auth"` URL and reads `X-Xet-Cas-Url`,
+`X-Xet-Access-Token` and `X-Xet-Token-Expiration` from the response *headers*; it never parses the
+JSON body §1 documents. `hf_xet` itself, when it refreshes, reads the body. A Hub facade has to
+send both.
+
+### 10.3 What the Python download path needs from `resolve`
+
+`hf_hub_download` sends `HEAD` with redirects off and requires `ETag` and `X-Repo-Commit` to be
+present, or it fails before looking at anything Xet. It follows a `Location` only when the URL is
+relative, and otherwise keeps it as the plain-HTTP fallback URL. The `Link` header's
+`rel="xet-auth"` entry must carry the *commit* as its revision, since the client caches by commit.
+
+### 10.4 What the Python upload path calls
+
+In order: `POST …/preupload/{revision}` (answered `uploadMode: "lfs"` for every file, which is what
+routes it to Xet), `GET …/xet-write-token/{revision}`, then `hf_xet` does the CAS work — global
+dedupe queries, `POST /v1/xorbs/default/{hash}`, `POST /v2/shards` — and finally
+`POST …/commit/{revision}` with `lfsFile` lines. It also probes `GET /api/agent-harnesses`, which
+may 404.

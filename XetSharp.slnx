@@ -2,9 +2,13 @@
   <Folder Name="/src/">
     <Project Path="src/XetSharp/XetSharp.csproj" />
     <Project Path="src/XetSharp.Extensions.DependencyInjection/XetSharp.Extensions.DependencyInjection.csproj" />
+    <Project Path="src/XetSharp.Server/XetSharp.Server.csproj" />
+    <Project Path="src/XetSharp.Server.Storage.S3/XetSharp.Server.Storage.S3.csproj" />
+    <Project Path="src/xet-server/xet-server.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/XetSharp.Tests/XetSharp.Tests.csproj" />
+    <Project Path="tests/XetSharp.Server.Tests/XetSharp.Server.Tests.csproj" />
   </Folder>
   <Folder Name="/benchmarks/">
     <Project Path="benchmarks/XetSharp.Benchmarks/XetSharp.Benchmarks.csproj" />

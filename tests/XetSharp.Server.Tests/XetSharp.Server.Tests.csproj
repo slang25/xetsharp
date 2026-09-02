@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" />
+    <PackageReference Include="Testcontainers.Floci" />
+    <PackageReference Include="TUnit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/XetSharp/XetSharp.csproj" />
+    <ProjectReference Include="../../src/XetSharp.Server/XetSharp.Server.csproj" />
+    <ProjectReference Include="../../src/XetSharp.Server.Storage.S3/XetSharp.Server.Storage.S3.csproj" />
+    <ProjectReference Include="../../src/xet-server/xet-server.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="../XetSharp.Tests/ReferenceFiles/*" Exclude="../XetSharp.Tests/ReferenceFiles/README.md" Link="ReferenceFiles/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

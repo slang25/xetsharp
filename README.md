@@ -110,11 +110,59 @@ The call returns the `IHttpClientBuilder` for the named client behind it, so han
 a different primary handler can be added the usual way. It is a separate package on purpose: the
 core library needs nothing from `Microsoft.Extensions.*` beyond `ILogger`.
 
+## Running a Xet server
+
+XetSharp also contains the other side of the protocol: a server that speaks the CAS API and enough
+of the Hugging Face Hub API — tokens, `resolve`, `preupload`, `commit` — for any Xet client to use
+it as if it were the Hub. The official Python client with its Rust `hf_xet` engine uploads to it
+and downloads from it unchanged; so does this library.
+
+```sh
+dotnet run --project src/xet-server -- --urls http://127.0.0.1:8080 --store /tmp/xet
+```
+
+Point a client at it and nothing else changes:
+
+```sh
+HF_ENDPOINT=http://127.0.0.1:8080 hf upload acme/scratch model.safetensors
+```
+
+```csharp
+using var client = new XetClient(new XetClientOptions { HubUrl = new Uri("http://127.0.0.1:8080/") });
+```
+
+`--store memory` (the default) keeps everything in RAM, a directory keeps it on disk, and
+`--store s3://bucket/prefix` keeps it in S3, where xorb data is handed to clients as presigned URLs
+and never passes through the server. The same binary runs as an AWS Lambda behind an HTTP API:
+the Lambda hosting layer is inert anywhere else.
+
+`dotnet publish src/xet-server -c Release -r <rid>` produces a single Native AOT executable, and
+thanks to [AotAnywhere](https://github.com/StuDevLabs/AotAnywhere) it does so for any of Linux
+(glibc and musl), macOS and Windows on x64 or arm64 from whatever machine you are on. CI publishes
+all eight from one Linux runner on every push, and a `v*` tag turns them into a GitHub release.
+The Linux binaries need OpenSSL on the machine they run on (`libssl3` on Debian and Ubuntu; Amazon
+Linux and the `runtime-deps` container images have it), as any .NET application does; nothing else.
+
+The server checks what it is given the way the public service does: a xorb must hash to the name
+it is uploaded under, a shard may only name xorbs that are stored, every chunk listing is compared
+with the xorb's own bytes, every term's verification hash and every file hash is recomputed. A
+global-deduplication query is answered with an HMAC-keyed shard, and a reconstruction's signed
+URLs authorize one exact set of byte ranges.
+
+Anyone can read and write by default, which is what a local server is for; `--hub-token` with
+`--no-anonymous-writes` (or the matching `XET_*` environment variables) closes that. To host it
+inside another ASP.NET Core application, reference `XetSharp.Server` and call `MapXetServer` with
+a `XetServer` over the store of your choice.
+
 ## Layout
 
 - `src/XetSharp` — the client library
 - `src/XetSharp.Extensions.DependencyInjection` — `AddXetClient` for applications using DI
+- `src/XetSharp.Server` — the server library: CAS API, Hub facade, memory and directory stores
+- `src/XetSharp.Server.Storage.S3` — the S3 store
+- `src/xet-server` — the single-binary host, for a laptop or a Lambda
 - `tests/XetSharp.Tests` — verification suite ([TUnit](https://tunit.dev)), including cross-checks against the [xet-core](https://github.com/huggingface/xet-core) reference implementation
+- `tests/XetSharp.Server.Tests` — the server's suite: the real client against the real server in-process, plus opt-in interop with the official Python client and an S3 endpoint
 - `benchmarks/XetSharp.Benchmarks` — [BenchmarkDotNet](https://benchmarkdotnet.org) suites for the per-byte work ([how to run](benchmarks/README.md))
 
 ## Building
@@ -147,4 +195,15 @@ on and a Hub token with write access to it. They clean up after themselves:
 
 ```sh
 XETSHARP_LIVE_UPLOAD_REPO=you/xetsharp-scratch dotnet run --project tests/XetSharp.Tests
+```
+
+The server's suite runs offline too. Its interop tests drive the official Python client against the
+server and need [`uv`](https://docs.astral.sh/uv/) on the path; its S3 tests start
+[Floci](https://github.com/floci-io/floci), a local AWS emulator, in a container, so they need
+Docker. Both are opt-in; `XETSHARP_S3_ENDPOINT` points the S3 tests at an endpoint you already have
+running instead:
+
+```sh
+XETSHARP_INTEROP_TESTS=1 dotnet run --project tests/XetSharp.Server.Tests
+XETSHARP_S3_TESTS=1 dotnet run --project tests/XetSharp.Server.Tests
 ```

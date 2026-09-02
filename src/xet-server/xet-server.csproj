@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!-- Cross-compiles the Native AOT binary for every supported OS and architecture from one machine,
+       which is what lets CI publish all of them from a single Linux runner. -->
+  <Sdk Name="StuDev.AotAnywhere" Version="1.0.5" />
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>xet-server</AssemblyName>
+    <RootNamespace>XetSharp.Server.Host</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- One binary for a laptop and for Lambda: the Lambda hosting package is inert outside Lambda. -->
+    <AWSProjectType>Lambda</AWSProjectType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Amazon.Lambda.AspNetCoreServer.Hosting" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../XetSharp.Server/XetSharp.Server.csproj" />
+    <ProjectReference Include="../XetSharp.Server.Storage.S3/XetSharp.Server.Storage.S3.csproj" />
+  </ItemGroup>
+
+</Project>

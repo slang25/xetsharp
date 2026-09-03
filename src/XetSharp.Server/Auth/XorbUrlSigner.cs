@@ -18,9 +18,11 @@ internal sealed class XorbUrlSigner(byte[] key, TimeProvider timeProvider)
     {
         var expires = timeProvider.GetUtcNow().Add(lifetime).ToUnixTimeSeconds();
         var signature = Base64Url.EncodeToString(Digest(xorb, rangeSpec, expires));
+        // Relative to the base rather than to the host, so a base with a path — a proxy prefix, an
+        // API Gateway stage — keeps that path in the URL.
         return new Uri(
             baseUrl,
-            $"{PathPrefix}{xorb}?X-Xet-Signed-Range={Uri.EscapeDataString(rangeSpec)}&Expires={expires}&Signature={signature}");
+            $"{PathPrefix.TrimStart('/')}{xorb}?X-Xet-Signed-Range={Uri.EscapeDataString(rangeSpec)}&Expires={expires}&Signature={signature}");
     }
 
     /// <summary>Whether the signature was made by this key over this xorb and range, and is still current.</summary>

@@ -119,8 +119,8 @@ internal sealed class HubEndpoints(XetServer server)
 
         server.Logger.Resolved(path, repository, revisionName, file.FileId);
         var baseUrl = server.BaseUrl(context.Request);
-        var tokenUrl = new Uri(baseUrl, $"/api/{repository.ApiSegment}/{repository.Id}/xet-read-token/{Uri.EscapeDataString(revision.CommitId)}");
-        var reconstructionUrl = new Uri(baseUrl, $"/v1/reconstructions/{file.FileId}");
+        var tokenUrl = new Uri(baseUrl, $"api/{repository.ApiSegment}/{repository.Id}/xet-read-token/{Uri.EscapeDataString(revision.CommitId)}");
+        var reconstructionUrl = new Uri(baseUrl, $"v1/reconstructions/{file.FileId}");
 
         var headers = context.Response.Headers;
         headers["X-Xet-Hash"] = file.FileId.ToString();
@@ -129,8 +129,8 @@ internal sealed class HubEndpoints(XetServer server)
         headers.ETag = $"\"{file.Sha256}\"";
         headers["X-Repo-Commit"] = revision.CommitId;
         headers.Link = $"<{tokenUrl}>; rel=\"xet-auth\", <{reconstructionUrl}>; rel=\"xet-reconstruction-info\"";
-        headers.Location = new Uri(baseUrl, $"/files/{file.FileId}").ToString();
-        headers.ContentLength = file.Size;
+        headers.Location = new Uri(baseUrl, $"files/{file.FileId}").ToString();
+        headers.ContentLength = HttpMethods.IsHead(context.Request.Method) ? file.Size : 0;
         context.Response.StatusCode = 302;
     }
 
@@ -238,7 +238,7 @@ internal sealed class HubEndpoints(XetServer server)
         await Responses.JsonAsync(context, writer =>
         {
             writer.WriteStartObject();
-            writer.WriteString("commitUrl", new Uri(baseUrl, $"/{RepositoryPathPrefix(repository)}{repository.Id}/commit/{commitId}").ToString());
+            writer.WriteString("commitUrl", new Uri(baseUrl, $"{RepositoryPathPrefix(repository)}{repository.Id}/commit/{commitId}").ToString());
             writer.WriteString("commitOid", commitId);
             writer.WriteNull("pullRequestUrl");
             writer.WriteEndObject();

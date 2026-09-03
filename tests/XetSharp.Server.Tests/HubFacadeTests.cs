@@ -202,4 +202,68 @@ public class HubFacadeTests
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         await Assert.That(json.RootElement.GetProperty("casUrl").GetString()).IsEqualTo("https://xet.example.com");
     }
+
+    /// <summary>
+    /// A server behind a path-prefixed proxy or an API Gateway stage has a public URL with a path,
+    /// and every URL it hands out — the redirect, the Link header, the commit URL, the signed xorb
+    /// URLs — has to keep that path, or nothing it points at is reachable.
+    /// </summary>
+    [Test]
+    public async Task Public_base_url_with_a_path_keeps_the_path_in_every_url()
+    {
+        const string publicUrl = "https://xet.example.com/xet";
+        await using var host = await TestXetServer.StartAsync(new XetServerOptions { PublicBaseUrl = new Uri(publicUrl + "/") });
+
+        // Committed inline, since a client pointed at the public URL could not reach this server's CAS.
+        var content = Encoding.UTF8.GetBytes("behind a prefix\n");
+        var body = $$$"""
+            {"key":"header","value":{"summary":"Add"}}
+            {"key":"file","value":{"path":"note.txt","content":"{{{Convert.ToBase64String(content)}}}","encoding":"base64"}}
+            """;
+        using var commit = await host.HttpClient.PostAsync("/api/models/acme/prefixed/commit/main", new StringContent(body, Encoding.UTF8, "application/x-ndjson"));
+        using var committed = JsonDocument.Parse(await commit.Content.ReadAsStringAsync());
+        await Assert.That(committed.RootElement.GetProperty("commitUrl").GetString()).StartsWith(publicUrl + "/acme/prefixed/commit/");
+
+        using var resolve = await host.HttpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, "/acme/prefixed/resolve/main/note.txt"));
+        await Assert.That(resolve.Headers.Location!.ToString()).StartsWith(publicUrl + "/files/");
+        var link = resolve.Headers.GetValues("Link").Single();
+        await Assert.That(link).Contains("<" + publicUrl + "/api/models/acme/prefixed/xet-read-token/");
+        await Assert.That(link).Contains("<" + publicUrl + "/v1/reconstructions/");
+
+        using var token = await host.HttpClient.GetAsync("/api/models/acme/prefixed/xet-read-token/main");
+        using var tokenJson = JsonDocument.Parse(await token.Content.ReadAsStringAsync());
+        await Assert.That(tokenJson.RootElement.GetProperty("casUrl").GetString()).IsEqualTo(publicUrl);
+
+        var fileId = resolve.Headers.GetValues("X-Xet-Hash").Single();
+        var reconstruction = new HttpRequestMessage(HttpMethod.Get, $"/v2/reconstructions/{fileId}");
+        reconstruction.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokenJson.RootElement.GetProperty("accessToken").GetString());
+        using var response = await host.HttpClient.SendAsync(reconstruction);
+        var xorbUrls = XetSharp.Cas.FileReconstruction.Parse(await response.Content.ReadAsByteArrayAsync()).Xorbs.Values.SelectMany(fetches => fetches).Select(fetch => fetch.Url.ToString()).ToList();
+        await Assert.That(xorbUrls).IsNotEmpty();
+        await Assert.That(xorbUrls.All(url => url.StartsWith(publicUrl + "/xorb/default/"))).IsTrue().Because(string.Join("\n", xorbUrls));
+    }
+
+    /// <summary>
+    /// Only HEAD is what the official client sends, but <c>curl -L</c> and huggingface_hub's
+    /// relative-redirect path GET the same URL. A GET must be a redirect too, not a Kestrel failure
+    /// over a Content-Length that no body follows — which is why this runs on Kestrel, not the
+    /// in-memory test host, which does not enforce the length.
+    /// </summary>
+    [Test]
+    public async Task Resolve_answers_a_get_with_the_same_redirect_as_a_head()
+    {
+        await using var host = await KestrelXetServer.StartAsync();
+        using var client = host.CreateClient();
+        var content = TestData.SplitMix64Bytes(7, 200_000);
+        await client.UploadAndCommitAsync(XetRepository.Model("acme/kestrel"), [XetUploadFile.FromBytes("data.bin", content)], "Add");
+
+        using var direct = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
+        using var response = await direct.GetAsync(new Uri(host.Url, "acme/kestrel/resolve/main/data.bin"));
+        await Assert.That((int)response.StatusCode).IsEqualTo(302);
+        await Assert.That(response.Headers.Location).IsNotNull();
+        await Assert.That(response.Headers.GetValues("X-Linked-Size").Single()).IsEqualTo(content.Length.ToString());
+
+        using var following = new HttpClient();
+        await Assert.That(await following.GetByteArrayAsync(new Uri(host.Url, "acme/kestrel/resolve/main/data.bin"))).IsEquivalentTo(content, CollectionOrdering.Matching);
+    }
 }

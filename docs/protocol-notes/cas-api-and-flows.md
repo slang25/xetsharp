@@ -655,7 +655,7 @@ the preupload call first, this is the first place to look.
 ## 10. What building a server adds
 
 Running the official Python client (`huggingface_hub` 1.29 with the Rust `hf_xet` engine) against
-XetSharp's own server turned up three things a server has to know that the spec pages do not say.
+XetSharp's own server turned up four things a server has to know that the spec pages do not say.
 All are pinned by `tests/XetSharp.Server.Tests/PythonInteropTests.cs`.
 
 ### 10.1 The reference client queries global dedupe under the `default` prefix

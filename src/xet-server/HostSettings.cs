@@ -29,8 +29,15 @@ internal sealed record HostSettings(string Store, string? Urls, XetServerOptions
           --help                         Print this.
         """;
 
-    public static HostSettings? Parse(string[] args)
+    /// <summary>
+    /// Reads the command line over the environment. Returns null when there are no settings to run
+    /// with, setting <paramref name="helpRequested"/> to tell the two reasons apart: the usage text
+    /// was asked for, or the command line was a mistake and has already been complained about.
+    /// </summary>
+    public static HostSettings? Parse(string[] args, out bool helpRequested)
     {
+        helpRequested = false;
+
         var store = Environment.GetEnvironmentVariable("XET_STORE") ?? "memory";
         string? urls = null;
         var publicUrl = Environment.GetEnvironmentVariable("XET_PUBLIC_URL");
@@ -67,6 +74,7 @@ internal sealed record HostSettings(string Store, string? Urls, XetServerOptions
                     anonymousReads = false;
                     break;
                 case "--help" or "-h":
+                    helpRequested = true;
                     return null;
                 default:
                     Console.Error.WriteLine($"Unknown option '{args[i]}'.");

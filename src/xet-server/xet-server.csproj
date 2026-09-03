@@ -20,6 +20,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="XetSharp.Server.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../XetSharp.Server/XetSharp.Server.csproj" />
     <ProjectReference Include="../XetSharp.Server.Storage.S3/XetSharp.Server.Storage.S3.csproj" />
   </ItemGroup>

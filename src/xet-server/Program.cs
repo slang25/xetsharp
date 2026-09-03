@@ -4,7 +4,13 @@ using XetSharp.Server;
 using XetSharp.Server.Host;
 using XetSharp.Server.Storage;
 
-var settings = HostSettings.Parse(args);
+var settings = HostSettings.Parse(args, out var helpRequested);
+if (helpRequested)
+{
+    Console.WriteLine(HostSettings.Usage);
+    return 0;
+}
+
 if (settings is null)
 {
     Console.Error.WriteLine(HostSettings.Usage);

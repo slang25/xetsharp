@@ -129,14 +129,18 @@ internal sealed class HubEndpoints(XetServer server)
         headers.ETag = $"\"{file.Sha256}\"";
         headers["X-Repo-Commit"] = revision.CommitId;
         headers.Link = $"<{tokenUrl}>; rel=\"xet-auth\", <{reconstructionUrl}>; rel=\"xet-reconstruction-info\"";
-        headers.Location = new Uri(baseUrl, $"files/{file.FileId}").ToString();
-        headers.ContentLength = HttpMethods.IsHead(context.Request.Method) ? file.Size : 0;
-        context.Response.StatusCode = 302;
+
+        // Answered in place rather than with a redirect. The Hub sends a Xet file's resolve to its
+        // CDN on another host, which the official client does not follow; a redirect that stays
+        // on this host it does follow, and then reads the metadata from where it lands. So the
+        // metadata and the bytes travel together, the way the Hub serves a file that is not on
+        // Xet: a client speaking Xet reads the headers and never asks for the body.
+        await SendFileAsync(context, file.FileId, file.Size).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// The whole file over plain HTTP, assembled from its xorbs — where the resolve redirect lands
-    /// for a client that is not speaking Xet, and the oracle the interop tests compare against.
+    /// The whole file over plain HTTP by its file ID, assembled from its xorbs — the oracle the
+    /// interop tests compare against.
     /// </summary>
     private async Task DownloadAsync(HttpContext context)
     {
@@ -144,13 +148,21 @@ internal sealed class HubEndpoints(XetServer server)
         RequireAccess(context, XetTokenScope.Read);
         var file = await server.Store.GetFileAsync(fileId, context.RequestAborted).ConfigureAwait(false)
             ?? throw XetServerException.NotFound($"No file {fileId} is registered.");
+        await SendFileAsync(context, file.FileId, file.Size).ConfigureAwait(false);
+    }
 
+    /// <summary>A registered file as an <c>application/octet-stream</c> body, or just its length for a HEAD.</summary>
+    private async Task SendFileAsync(HttpContext context, MerkleHash fileId, long size)
+    {
         context.Response.ContentType = "application/octet-stream";
-        context.Response.ContentLength = file.Size;
+        context.Response.ContentLength = size;
         if (HttpMethods.IsHead(context.Request.Method))
         {
             return;
         }
+
+        var file = await server.Store.GetFileAsync(fileId, context.RequestAborted).ConfigureAwait(false)
+            ?? throw new InvalidOperationException($"File {fileId} is named by a repository but is not registered.");
 
         var buffer = new ArrayBufferWriter<byte>();
         foreach (var term in file.Terms)

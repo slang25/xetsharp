@@ -1,3 +1,4 @@
+using System.Net;
 using System.Security.Cryptography;
 using XetSharp.Chunking;
 using XetSharp.Hashing;
@@ -149,18 +150,18 @@ public class RoundTripTests
     }
 
     [Test]
-    public async Task Serves_the_whole_file_over_plain_http_where_the_resolve_redirect_points()
+    public async Task Serves_the_whole_file_over_plain_http_from_resolve_and_by_file_id()
     {
         await using var host = await TestXetServer.StartAsync();
         using var client = host.CreateClient();
         var content = TestData.SplitMix64Bytes(5, 500_000);
         await client.UploadAndCommitAsync(Repository, [XetUploadFile.FromBytes("data.bin", content)], "Add");
 
-        using var resolve = await host.HttpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, "/acme/scratch/resolve/main/data.bin"));
-        await Assert.That((int)resolve.StatusCode).IsEqualTo(302);
-        var location = resolve.Headers.Location!;
+        using var resolve = await host.HttpClient.GetAsync("/acme/scratch/resolve/main/data.bin");
+        await Assert.That(resolve.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(await resolve.Content.ReadAsByteArrayAsync()).IsEquivalentTo(content, CollectionOrdering.Matching);
 
-        var plain = await host.HttpClient.GetByteArrayAsync(location);
-        await Assert.That(plain).IsEquivalentTo(content, CollectionOrdering.Matching);
+        var byId = await host.HttpClient.GetByteArrayAsync($"/files/{resolve.Headers.GetValues("X-Xet-Hash").Single()}");
+        await Assert.That(byId).IsEquivalentTo(content, CollectionOrdering.Matching);
     }
 }

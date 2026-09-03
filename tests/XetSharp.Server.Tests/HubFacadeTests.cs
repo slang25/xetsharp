@@ -70,7 +70,7 @@ public class HubFacadeTests
         var upload = await client.UploadAndCommitAsync(Repository, [XetUploadFile.FromBytes("dir/data.bin", content)], "Add");
 
         using var response = await host.HttpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, "/datasets/acme/data/resolve/main/dir/data.bin"));
-        await Assert.That((int)response.StatusCode).IsEqualTo(302);
+        await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.OK);
 
         var file = upload.Files.Single();
         await Assert.That(response.Headers.GetValues("X-Xet-Hash").Single()).IsEqualTo(file.FileId.ToString());
@@ -78,7 +78,7 @@ public class HubFacadeTests
         await Assert.That(response.Headers.GetValues("X-Linked-Etag").Single()).IsEqualTo($"\"{file.Sha256}\"");
         await Assert.That(response.Headers.ETag!.Tag).IsEqualTo($"\"{file.Sha256}\"");
         await Assert.That(response.Headers.GetValues("X-Repo-Commit").Single()).IsEqualTo(upload.Commit!.CommitOid);
-        await Assert.That(response.Headers.Location!.ToString()).IsEqualTo($"{host.BaseUrl}files/{file.FileId}");
+        await Assert.That(response.Content.Headers.ContentLength).IsEqualTo(content.Length);
 
         var link = response.Headers.GetValues("Link").Single();
         await Assert.That(link).Contains($"/api/datasets/acme/data/xet-read-token/{upload.Commit.CommitOid}>; rel=\"xet-auth\"");
@@ -86,7 +86,7 @@ public class HubFacadeTests
 
         // The commit the headers name works as a revision, which is how a client pins a download.
         using var pinned = await host.HttpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, $"/datasets/acme/data/resolve/{upload.Commit.CommitOid}/dir/data.bin"));
-        await Assert.That((int)pinned.StatusCode).IsEqualTo(302);
+        await Assert.That(pinned.StatusCode).IsEqualTo(HttpStatusCode.OK);
 
         using var missing = await host.HttpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, "/datasets/acme/data/resolve/main/nope.bin"));
         await Assert.That(missing.StatusCode).IsEqualTo(HttpStatusCode.NotFound);
@@ -119,7 +119,7 @@ public class HubFacadeTests
 
         // The earlier commit still resolves what it had.
         using var historic = await host.HttpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, $"/datasets/acme/data/resolve/{first.Commit.CommitOid}/one.bin"));
-        await Assert.That((int)historic.StatusCode).IsEqualTo(302);
+        await Assert.That(historic.StatusCode).IsEqualTo(HttpStatusCode.OK);
     }
 
     [Test]
@@ -254,8 +254,8 @@ public class HubFacadeTests
 
     /// <summary>
     /// A server behind a path-prefixed proxy or an API Gateway stage has a public URL with a path,
-    /// and every URL it hands out — the redirect, the Link header, the commit URL, the signed xorb
-    /// URLs — has to keep that path, or nothing it points at is reachable.
+    /// and every URL it hands out — the Link header, the commit URL, the signed xorb URLs — has to
+    /// keep that path, or nothing it points at is reachable.
     /// </summary>
     [Test]
     public async Task Public_base_url_with_a_path_keeps_the_path_in_every_url()
@@ -274,7 +274,6 @@ public class HubFacadeTests
         await Assert.That(committed.RootElement.GetProperty("commitUrl").GetString()).StartsWith(publicUrl + "/acme/prefixed/commit/");
 
         using var resolve = await host.HttpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, "/acme/prefixed/resolve/main/note.txt"));
-        await Assert.That(resolve.Headers.Location!.ToString()).StartsWith(publicUrl + "/files/");
         var link = resolve.Headers.GetValues("Link").Single();
         await Assert.That(link).Contains("<" + publicUrl + "/api/models/acme/prefixed/xet-read-token/");
         await Assert.That(link).Contains("<" + publicUrl + "/v1/reconstructions/");
@@ -293,26 +292,32 @@ public class HubFacadeTests
     }
 
     /// <summary>
-    /// Only HEAD is what the official client sends, but <c>curl -L</c> and huggingface_hub's
-    /// relative-redirect path GET the same URL. A GET must be a redirect too, not a Kestrel failure
-    /// over a Content-Length that no body follows — which is why this runs on Kestrel, not the
-    /// in-memory test host, which does not enforce the length.
+    /// The official client follows a resolve redirect that stays on the same host and reads the
+    /// metadata from wherever it lands, so a redirect to a plain download route loses it. The
+    /// resolve answers in place instead: a HEAD gives the headers, a GET the same headers and the
+    /// bytes. Runs on Kestrel, which unlike the in-memory host enforces Content-Length.
     /// </summary>
     [Test]
-    public async Task Resolve_answers_a_get_with_the_same_redirect_as_a_head()
+    public async Task Resolve_answers_a_get_with_the_file_and_the_same_headers_as_a_head()
     {
         await using var host = await KestrelXetServer.StartAsync();
         using var client = host.CreateClient();
         var content = TestData.SplitMix64Bytes(7, 200_000);
-        await client.UploadAndCommitAsync(XetRepository.Model("acme/kestrel"), [XetUploadFile.FromBytes("data.bin", content)], "Add");
+        var upload = await client.UploadAndCommitAsync(XetRepository.Model("acme/kestrel"), [XetUploadFile.FromBytes("data.bin", content)], "Add");
+        var url = new Uri(host.Url, "acme/kestrel/resolve/main/data.bin");
 
-        using var direct = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
-        using var response = await direct.GetAsync(new Uri(host.Url, "acme/kestrel/resolve/main/data.bin"));
-        await Assert.That((int)response.StatusCode).IsEqualTo(302);
-        await Assert.That(response.Headers.Location).IsNotNull();
-        await Assert.That(response.Headers.GetValues("X-Linked-Size").Single()).IsEqualTo(content.Length.ToString());
+        using var http = new HttpClient();
+        using var head = await http.SendAsync(new HttpRequestMessage(HttpMethod.Head, url));
+        await Assert.That(head.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(head.Content.Headers.ContentLength).IsEqualTo(content.Length);
 
-        using var following = new HttpClient();
-        await Assert.That(await following.GetByteArrayAsync(new Uri(host.Url, "acme/kestrel/resolve/main/data.bin"))).IsEquivalentTo(content, CollectionOrdering.Matching);
+        using var get = await http.GetAsync(url);
+        await Assert.That(get.StatusCode).IsEqualTo(HttpStatusCode.OK);
+        await Assert.That(await get.Content.ReadAsByteArrayAsync()).IsEquivalentTo(content, CollectionOrdering.Matching);
+        await Assert.That(get.Headers.GetValues("X-Repo-Commit").Single()).IsEqualTo(upload.Commit!.CommitOid);
+        foreach (var name in new[] { "X-Xet-Hash", "X-Linked-Size", "X-Linked-Etag", "X-Repo-Commit", "Link" })
+        {
+            await Assert.That(get.Headers.GetValues(name).Single()).IsEqualTo(head.Headers.GetValues(name).Single()).Because(name);
+        }
     }
 }

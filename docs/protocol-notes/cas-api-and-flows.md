@@ -654,7 +654,7 @@ the preupload call first, this is the first place to look.
 
 ## 10. What building a server adds
 
-Running the official Python client (`huggingface_hub` 1.29 with the Rust `hf_xet` engine) against
+Running the official Python client (`huggingface_hub` 1.30 with the Rust `hf_xet` engine) against
 XetSharp's own server turned up four things a server has to know that the spec pages do not say.
 All are pinned by `tests/XetSharp.Server.Tests/PythonInteropTests.cs`.
 
@@ -674,10 +674,14 @@ send both.
 
 ### 10.3 What the Python download path needs from `resolve`
 
-`hf_hub_download` sends `HEAD` with redirects off and requires `ETag` and `X-Repo-Commit` to be
-present, or it fails before looking at anything Xet. It follows a `Location` only when the URL is
-relative, and otherwise keeps it as the plain-HTTP fallback URL. The `Link` header's
-`rel="xet-auth"` entry must carry the *commit* as its revision, since the client caches by commit.
+`hf_hub_download` sends `HEAD` and requires `ETag` and `X-Repo-Commit` to be present, or it fails
+before looking at anything Xet. Since `huggingface_hub` 1.30 it follows a `Location` that stays on
+the same host (or any Hub host) and reads the metadata from the response it lands on; only a
+redirect to another host is left unfollowed, with its own headers used. A facade on one host
+therefore cannot redirect a Xet file's resolve to a plain download route: XetSharp's server answers
+the resolve in place — headers on a `HEAD`, headers and bytes on a `GET`, the way the Hub serves a
+file that is not on Xet. The `Link` header's `rel="xet-auth"` entry must carry the *commit* as its
+revision, since the client caches by commit.
 
 ### 10.4 What the Python upload path calls
 

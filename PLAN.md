@@ -39,7 +39,108 @@ Three rings, in order of feedback speed:
 - **M3 — Upload** ✅: chunk → deduplicate (within the upload and against the global index, HMAC-keyed matching and all) → pack xorbs measured against the 64 MiB ceiling rather than estimated → upload them, bounded and concurrent → build one shard with per-term verification hashes and the SHA-256 a Git repo's LFS pointer needs → send it only once every xorb it names is stored. Plus the Hub commit that publishes the result. 363 tests: the upload round-trips through the download pipeline, and the 63 MB reference file produces the very shard xet-core uploaded for it, byte for byte.
 - **M4 — Performance & polish** ✅: BenchmarkDotNet suites over every per-byte path (chunking, hashing, xorb serialization, shard writing) with a throughput column; `IProgress<XetProgress>` on every download and upload; `ILogger` at the token, request, xorb and transfer seams, silent unless a factory is handed in; `AddXetClient` in a separate `XetSharp.Extensions.DependencyInjection` package; NuGet packaging with SourceLink, symbols, XML docs and the README in the package. The gearhash loop was measured rather than optimised on faith, and the measurement said to leave it alone; the same measurement said to parallelize xorb packing, which is now done and made an uploaded byte **2.3x cheaper** — see below. Transfer concurrency got the same treatment last: rather than tune it against a stand-in service, `sweep` downloads real bytes from the real Hub at each setting, and what it measured says to leave the defaults alone too — see below. 408 tests.
 
+- **M5 — A server** ✅: `XetSharp.Server` speaks the CAS API and the slice of the Hub API a client
+  needs — tokens, `resolve`, `preupload`, `commit` — over a storage seam with memory, directory and S3
+  behind it; `xet-server` hosts it as one Native AOT binary that is also a Lambda. See *The other
+  side of the protocol* below. 49 tests in its own suite, three of them driving the official Python
+  client's Rust engine against it.
+
+## The other side of the protocol
+
+There is no reference server to port: xet-core and huggingface.js are clients, and the service
+behind `cas-server.xethub.hf.co` is not published. So the server was built from the spec, the
+OpenAPI document in xet-core (`openapi/cas.openapi.yaml`), what the captured responses show the
+real service doing, and what the official clients turned out to need — and verified the only way a
+server can be: by the clients it did not write.
+
+What it is:
+
+- **`XetSharp.Server`**, a library. `MapXetServer(server)` puts the whole thing into any ASP.NET
+  Core application; `MapXetCas` and `MapXetHub` map either half alone. Handlers are plain
+  `RequestDelegate`s over `Utf8JsonWriter` and `JsonDocument`, so nothing needs reflection and the
+  trimming and AOT analyzers run clean.
+- **`IXetStore` and `IRepositoryStore`**: xorbs with their chunk indexes, registered files, the
+  sampled chunk index for global deduplication; and repositories with commits. Three
+  implementations — memory, a directory laid out like a Git object store, and S3 — behind the same
+  endpoints. The S3 store hands out presigned URLs so xorb bytes never pass through the server.
+- **`xet-server`**, one binary. `--store memory|<dir>|s3://bucket/prefix`, flags or `XET_*`
+  environment variables, `AddAWSLambdaHosting` wired in and inert outside Lambda. It publishes to a
+  20 MB Native AOT executable with zero IL warnings — for every OS and architecture from one
+  machine, through [AotAnywhere](https://github.com/StuDevLabs/AotAnywhere), which is how CI
+  publishes all eight RIDs from a single Linux runner and a `v*` tag becomes a release.
+
+What it checks, none of it on trust:
+
+- A xorb is read chunk by chunk — decompressed, hashed, offsets recorded — and refused unless its
+  chunks hash to the name it was uploaded under. That index, not the shard's listing, is what
+  reconstructions are served from; the shard's listing is compared against it and refused on any
+  difference.
+- A shard may only name stored xorbs; every term's range must fit its xorb and its
+  `unpacked_length` must be the chunks' sum; every verification hash is recomputed; every file hash
+  is recomputed from its terms' chunks. Verification entries are required, as the spec says for
+  uploads.
+- Tokens are HMAC'd claims, so any instance with the key checks any other's. Signed xorb URLs
+  authorize one exact set of byte ranges until they expire, and a `GET` without a `Range` is a 403
+  rather than the object — the same rule the CDN applies.
+- Range reconstructions are trimmed to whole chunks with `offset_into_first_range` set, matching
+  the captured responses from the real service; adjacent and overlapping ranges in one xorb are
+  coalesced; v1, v2 and batch shapes are all served.
+
+What verifies it:
+
+- **The XetSharp client against it, in-process.** `TestServer` hosts the server and the real client
+  is pointed at it, so an upload goes through the real pipeline on both sides and comes back down
+  the same way. Files across several xorbs, ranges starting mid-chunk, two files sharing chunks (a
+  multi-range signed URL, answered as `multipart/byteranges`), a second upload deduplicating
+  through the global index.
+- **The official Python client against it, out of process.** `huggingface_hub` with `hf_xet`, the
+  Rust reference engine, run by `uv` against the server on a real port: it uploads and XetSharp
+  downloads, XetSharp uploads and it downloads, and it deduplicates a second upload against the
+  first. This is the test that found the `default` prefix (below). Opt-in with
+  `XETSHARP_INTEROP_TESTS=1`.
+- **Every refusal, one request each.** No token, a read token on an upload, a foreign token, an
+  expired one, a xorb under the wrong hash, bytes that are not a xorb, a shard naming a missing xorb
+  (as a 400 from `/v1/shards` and as an `error` event from `/v2/shards`), a forged verification
+  hash, a forged file hash, a listing that disagrees with the xorb, a tampered signature, an altered
+  `Range`, an expired URL.
+- **The S3 store against Floci**, a local AWS emulator started in Docker by the test itself
+  through Testcontainers, opt-in with `XETSHARP_S3_TESTS=1` and on in CI: the same round trip with
+  the client fetching from presigned URLs, and the global index living in the bucket.
+
+What the reference client taught the server, written up in
+[docs/protocol-notes/cas-api-and-flows.md §10](docs/protocol-notes/cas-api-and-flows.md#10-what-building-a-server-adds):
+
+- **`hf_xet` queries global deduplication under the `default` prefix**, not the `default-merkledb`
+  the spec calls the only acceptable value. A server enforcing the spec's wording turns every one
+  of its queries into a miss, silently. The server accepts both.
+- The Python client reads the CAS URL, token and expiry from **response headers** on the token
+  endpoint, not from the JSON body the spec documents. The facade sends both.
+- `hf_hub_download` requires `ETag` and `X-Repo-Commit` on the resolve response, keeps an absolute
+  `Location` as its plain-HTTP fallback, and pins its token URL to the commit.
+
 ## Decisions taken (flag if you disagree)
+
+- **The server takes no shard on trust.** It could have stored the CAS-info listing a shard
+  carries and served reconstructions from that, the way a client might assume the service does.
+  Instead every uploaded xorb is fully read at upload time and the listing is checked against it.
+  It costs a decompression pass per uploaded byte, once, and it means a reconstruction can never
+  point at the wrong bytes because a client lied or had a bug — which, given that this server's
+  main job is to test clients, is the property that matters.
+- **Everything the Hub facade stores is a Xet file**, including the small files a client sends
+  inline in a commit: they are chunked and packed server-side through the same code a client uses.
+  One download path, no second kind of file.
+- **`preupload` answers `lfs` for every file**, so the official client routes everything through
+  Xet. The public Hub keeps small text files as regular Git blobs; a server that exists to exercise
+  the protocol has no reason to.
+- **Anonymous reads and writes are on by default.** A dev server that refuses uploads until it is
+  configured is one nobody uses. `HubTokens` plus `AllowAnonymousWrites = false` closes it, and the
+  README says to.
+- **The signing key is random per process unless configured.** Right for one process; the option
+  exists, and is documented, for anything that scales out — including Lambda, where every instance
+  must hold the same key.
+- **One binary for laptop and Lambda** rather than two projects. `AddAWSLambdaHosting` is inert
+  outside Lambda, so the cost is a dependency the AOT compiler trims when unused, and the benefit is
+  that the thing tested locally is the thing deployed.
 
 - **BLAKE3** via the `Blake3` NuGet package (xoofx — native SIMD bindings, the fastest managed option). A pure-managed fallback could come later if the native dependency is a problem.
 - **`net10.0` only** to start; multi-targeting (e.g. `netstandard2.0` for older consumers) deferred until the API stabilises.
@@ -212,6 +313,26 @@ Mbit/s link — full numbers in [benchmarks/README.md](benchmarks/README.md#meas
   the resulting in-flight ceiling for any file, transferring nothing.
 
 ## Open questions for you
+
+- **Lambda cannot take a full-size xorb.** Function URLs and API Gateway cap a request body at 6 MB
+  (10 MB for REST APIs); a xorb is up to 64 MiB, and the protocol POSTs it to the CAS URL with no
+  way to redirect a client to S3. So a Lambda deployment serves downloads fully, and uploads only
+  of xorbs under the cap. The way out is a presigned-PUT extension the clients do not speak, or
+  fronting the upload endpoints with something that is not Lambda (a container behind the same
+  hostname). Worth deciding before anyone deploys it for uploads.
+- **The S3 store has run against Floci, not against S3.** Presigned URL generation and the
+  path-style addressing an emulator needs are the two places real S3 could differ. A run against a
+  real bucket is one environment variable away (`XETSHARP_S3_ENDPOINT` plus AWS credentials).
+- **No Lambda has actually been invoked.** The hosting package and its AOT serializer compile and
+  the binary runs as a plain web server; the Lambda entry path is untested until something deploys
+  it. The `HttpApi` event source is assumed; a function URL uses the same shape.
+- **Should `preupload` mimic the Hub's small-file rule?** Today every file is `lfs`, which is the
+  right default for a protocol test server and the wrong one for a stand-in Hub someone wants to
+  run a whole workflow against. A size threshold is a one-line change if that need appears.
+- **Tokens are not scoped to the repository they were minted for.** The claims carry it, but the
+  CAS endpoints do not check it — a file ID is global and the public service behaves the same as far
+  as can be observed. Enforcing it would need the file-to-repository mapping the Hub facade keeps,
+  and would make the CAS half depend on the Hub half.
 
 - Package identity: publish as `XetSharp` on NuGet when ready? The projects are packable now — `dotnet pack -c Release` produces `XetSharp` and `XetSharp.Extensions.DependencyInjection`, both at `0.1.0` with symbols and SourceLink — but nothing publishes them. A release workflow (tag → pack → push) is a small job once you've decided on the identity and where the API key lives.
 - Any interest in a `netstandard2.0`/`net8.0` multi-target early (e.g. for use inside other tools), or is `net10.0`-only fine for now?

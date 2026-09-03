@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>A Xet protocol server for .NET: the CAS API and a Hugging Face Hub facade, hostable in-process with ASP.NET Core, backed by memory, a directory, or S3.</Description>
+    <IsPackable>true</IsPackable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="XetSharp.Server.Tests" />
+    <InternalsVisibleTo Include="XetSharp.Server.Storage.S3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../XetSharp/XetSharp.csproj" />
+  </ItemGroup>
+
+</Project>

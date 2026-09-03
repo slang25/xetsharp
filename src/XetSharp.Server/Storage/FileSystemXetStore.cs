@@ -23,7 +23,7 @@ public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStor
             return null;
         }
 
-        return StoredXorbCodec.Decode(hash, await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false));
+        return StoredXorbCodec.Decode(hash, await ReadSharedAsync(path, cancellationToken).ConfigureAwait(false));
     }
 
     public async ValueTask<bool> PutXorbAsync(StoredXorb xorb, ReadOnlyMemory<byte> serialized, CancellationToken cancellationToken = default)
@@ -79,7 +79,7 @@ public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStor
     {
         var path = FilePath(fileId);
         return File.Exists(path)
-            ? StoredFileCodec.Decode(await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false))
+            ? StoredFileCodec.Decode(await ReadSharedAsync(path, cancellationToken).ConfigureAwait(false))
             : null;
     }
 
@@ -91,7 +91,7 @@ public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStor
             return null;
         }
 
-        var fileId = MerkleHash.Parse((await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false)).Trim());
+        var fileId = MerkleHash.Parse(await ReadTextSharedAsync(path, cancellationToken).ConfigureAwait(false));
         return await GetFileAsync(fileId, cancellationToken).ConfigureAwait(false);
     }
 
@@ -114,7 +114,7 @@ public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStor
             return null;
         }
 
-        var fields = (await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false)).Split(' ');
+        var fields = (await ReadTextSharedAsync(path, cancellationToken).ConfigureAwait(false)).Split(' ');
         return new ChunkLocation(MerkleHash.Parse(fields[0]), int.Parse(fields[1]));
     }
 
@@ -159,7 +159,7 @@ public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStor
     {
         var branchPath = BranchPath(repository, branch);
         return File.Exists(branchPath)
-            ? (await File.ReadAllTextAsync(branchPath, cancellationToken).ConfigureAwait(false)).Trim()
+            ? await ReadTextSharedAsync(branchPath, cancellationToken).ConfigureAwait(false)
             : null;
     }
 
@@ -167,7 +167,7 @@ public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStor
     {
         var commitPath = CommitPath(repository, commitId);
         return File.Exists(commitPath)
-            ? RepositoryRevisionCodec.Decode(await File.ReadAllBytesAsync(commitPath, cancellationToken).ConfigureAwait(false))
+            ? RepositoryRevisionCodec.Decode(await ReadSharedAsync(commitPath, cancellationToken).ConfigureAwait(false))
             : null;
     }
 
@@ -219,7 +219,7 @@ public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStor
 
             if (overwrite)
             {
-                File.Move(temporary, path, overwrite: true);
+                await ReplaceAsync(temporary, path, cancellationToken).ConfigureAwait(false);
                 return true;
             }
 
@@ -238,4 +238,50 @@ public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStor
             File.Delete(temporary);
         }
     }
+
+    /// <summary>
+    /// Renames over an existing file. Windows refuses to replace a file another handle has open
+    /// unless that handle shares deletion — which every read here does, see
+    /// <see cref="ReadSharedAsync"/> — and can still say no for a moment while a handle is on its
+    /// way out, so a refusal is retried briefly before it is an error.
+    /// </summary>
+    private static async Task ReplaceAsync(string temporary, string path, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.Move(temporary, path, overwrite: true);
+                return;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException && attempt < ReplaceAttempts)
+            {
+                await Task.Delay(ReplaceRetryDelay, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private const int ReplaceAttempts = 10;
+
+    private static readonly TimeSpan ReplaceRetryDelay = TimeSpan.FromMilliseconds(20);
+
+    /// <summary>
+    /// Reads a whole file, sharing it for writing and deletion, so that a pointer being replaced
+    /// under a reader — a branch advancing, a SHA-256 recorded again — lets the rename through on
+    /// Windows, which otherwise refuses to replace a file anyone holds open. The reader keeps the
+    /// bytes it opened, as it does everywhere else.
+    /// </summary>
+    private static async Task<byte[]> ReadSharedAsync(string path, CancellationToken cancellationToken)
+    {
+        var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using (stream.ConfigureAwait(false))
+        {
+            var bytes = new byte[stream.Length];
+            await stream.ReadExactlyAsync(bytes, cancellationToken).ConfigureAwait(false);
+            return bytes;
+        }
+    }
+
+    private static async Task<string> ReadTextSharedAsync(string path, CancellationToken cancellationToken) =>
+        Encoding.ASCII.GetString(await ReadSharedAsync(path, cancellationToken).ConfigureAwait(false)).Trim();
 }

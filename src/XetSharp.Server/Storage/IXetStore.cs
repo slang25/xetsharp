@@ -38,13 +38,20 @@ public interface IXetStore
     ValueTask<StoredFile?> GetFileAsync(MerkleHash fileId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// A registered file by the SHA-256 of its contents, or null. This is how a Hub commit's LFS
-    /// pointer, which names files by SHA-256, finds the Xet file it refers to.
+    /// A file uploaded to <paramref name="repository"/>, by the SHA-256 of its contents, or null.
+    /// This is how a Hub commit's LFS pointer, which names files by SHA-256, finds the Xet file it
+    /// refers to. The lookup is per repository because the SHA-256 is a claim the uploader's shard
+    /// makes, not something the server derives from the bytes: scoped this way, a repository's
+    /// commits resolve only what was uploaded to that repository, as on the Hub, and a wrong or
+    /// forged claim reaches no other repository.
     /// </summary>
-    ValueTask<StoredFile?> GetFileBySha256Async(MerkleHash sha256, CancellationToken cancellationToken = default);
+    ValueTask<StoredFile?> GetFileBySha256Async(RepositoryId repository, MerkleHash sha256, CancellationToken cancellationToken = default);
 
-    /// <summary>Registers a file, returning false when it was already registered.</summary>
-    ValueTask<bool> PutFileAsync(StoredFile file, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Registers a file, returning false when it was already registered, and records its SHA-256,
+    /// when it carries one, as an upload to <paramref name="repository"/>.
+    /// </summary>
+    ValueTask<bool> PutFileAsync(StoredFile file, RepositoryId repository, CancellationToken cancellationToken = default);
 
     /// <summary>Where a chunk is stored, or null when it is not in the global-deduplication index.</summary>
     ValueTask<ChunkLocation?> FindChunkAsync(MerkleHash chunkHash, CancellationToken cancellationToken = default);

@@ -66,7 +66,7 @@ internal sealed class ReconstructionBuilder(IXetStore store, XorbUrlSigner signe
         }
 
         var (start, end) = range.Value;
-        if (start >= file.Size && file.Size > 0)
+        if (start >= file.Size)
         {
             throw new XetServerException(416, $"The range starts at byte {start}, past the end of the {file.Size}-byte file.");
         }

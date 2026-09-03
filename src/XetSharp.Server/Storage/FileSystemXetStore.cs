@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 
 namespace XetSharp.Server.Storage;
@@ -10,6 +11,7 @@ namespace XetSharp.Server.Storage;
 public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStore
 {
     private readonly string _root = Path.GetFullPath(root);
+    private readonly ConcurrentDictionary<RepositoryId, SemaphoreSlim> _commitGates = new();
 
     public string Root => _root;
 
@@ -32,11 +34,10 @@ public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStor
             return false;
         }
 
-        // Bytes first, index last: the index is what says a xorb exists, so a crash between the
-        // two leaves an orphaned blob rather than an index pointing at nothing.
+        // Bytes and chunk entries first, index last: the index is what says a xorb exists, so a
+        // crash before it leaves orphans a retry completes, rather than a xorb that looks whole
+        // but is missing from the global-deduplication index for good.
         await WriteAtomicallyAsync(XorbPath(xorb.Hash), serialized, cancellationToken).ConfigureAwait(false);
-        var inserted = await WriteAtomicallyAsync(indexPath, StoredXorbCodec.Encode(xorb), cancellationToken, overwrite: false).ConfigureAwait(false);
-
         for (var i = 0; i < xorb.Chunks.Length; i++)
         {
             var chunk = xorb.Chunks[i].Hash;
@@ -46,7 +47,7 @@ public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStor
             }
         }
 
-        return inserted;
+        return await WriteAtomicallyAsync(indexPath, StoredXorbCodec.Encode(xorb), cancellationToken, overwrite: false).ConfigureAwait(false);
     }
 
     public async ValueTask CopyXorbRangeAsync(MerkleHash hash, long start, long end, Stream destination, CancellationToken cancellationToken = default)
@@ -82,9 +83,9 @@ public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStor
             : null;
     }
 
-    public async ValueTask<StoredFile?> GetFileBySha256Async(MerkleHash sha256, CancellationToken cancellationToken = default)
+    public async ValueTask<StoredFile?> GetFileBySha256Async(RepositoryId repository, MerkleHash sha256, CancellationToken cancellationToken = default)
     {
-        var path = Sha256Path(sha256);
+        var path = Sha256Path(repository, sha256);
         if (!File.Exists(path))
         {
             return null;
@@ -94,12 +95,12 @@ public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStor
         return await GetFileAsync(fileId, cancellationToken).ConfigureAwait(false);
     }
 
-    public async ValueTask<bool> PutFileAsync(StoredFile file, CancellationToken cancellationToken = default)
+    public async ValueTask<bool> PutFileAsync(StoredFile file, RepositoryId repository, CancellationToken cancellationToken = default)
     {
         var inserted = await WriteAtomicallyAsync(FilePath(file.FileId), StoredFileCodec.Encode(file), cancellationToken, overwrite: false).ConfigureAwait(false);
         if (file.Sha256 is { } sha256)
         {
-            await WriteAtomicallyAsync(Sha256Path(sha256), Encoding.ASCII.GetBytes(file.FileId.ToString()), cancellationToken).ConfigureAwait(false);
+            await WriteAtomicallyAsync(Sha256Path(repository, sha256), Encoding.ASCII.GetBytes(file.FileId.ToString()), cancellationToken).ConfigureAwait(false);
         }
 
         return inserted;
@@ -119,38 +120,55 @@ public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStor
 
     public async ValueTask<RepositoryRevision?> GetRevisionAsync(RepositoryId repository, string revision, CancellationToken cancellationToken = default)
     {
-        var commitId = revision;
-        var branchPath = BranchPath(repository, revision);
-        if (File.Exists(branchPath))
-        {
-            commitId = (await File.ReadAllTextAsync(branchPath, cancellationToken).ConfigureAwait(false)).Trim();
-        }
-
-        var commitPath = CommitPath(repository, commitId);
-        return File.Exists(commitPath)
-            ? RepositoryRevisionCodec.Decode(await File.ReadAllBytesAsync(commitPath, cancellationToken).ConfigureAwait(false))
-            : null;
+        var commitId = await ReadBranchAsync(repository, revision, cancellationToken).ConfigureAwait(false) ?? revision;
+        return await ReadCommitAsync(repository, commitId, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<string> CommitAsync(RepositoryId repository, string branch, RepositoryCommit commit, CancellationToken cancellationToken = default)
     {
-        var parent = await GetRevisionAsync(repository, branch, cancellationToken).ConfigureAwait(false);
-        var files = parent is null ? [] : new Dictionary<string, RepositoryFile>(parent.Files);
-        foreach (var path in commit.Deleted)
+        // One commit at a time per repository, so the parent check and the branch advance cannot
+        // interleave with another commit's. The gate is this process's, which is enough: a
+        // directory store is one server's, not shared between instances.
+        var gate = _commitGates.GetOrAdd(repository, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            files.Remove(path);
-        }
+            var head = await ReadBranchAsync(repository, branch, cancellationToken).ConfigureAwait(false);
+            if (commit.ParentCommit is { } parent && head is not null && parent != head)
+            {
+                throw new BranchMovedException(branch, parent, head);
+            }
 
-        foreach (var file in commit.Added)
+            var parentRevision = head is null ? null : await ReadCommitAsync(repository, head, cancellationToken).ConfigureAwait(false);
+            var commitId = InMemoryXetStore.NewCommitId();
+            await WriteAtomicallyAsync(
+                CommitPath(repository, commitId),
+                RepositoryRevisionCodec.Encode(new RepositoryRevision(commitId, commit.ApplyTo(parentRevision))),
+                cancellationToken).ConfigureAwait(false);
+            await WriteAtomicallyAsync(BranchPath(repository, branch), Encoding.ASCII.GetBytes(commitId), cancellationToken).ConfigureAwait(false);
+            return commitId;
+        }
+        finally
         {
-            files[file.Path] = file;
+            gate.Release();
         }
+    }
 
-        var commitId = InMemoryXetStore.NewCommitId();
-        await WriteAtomicallyAsync(CommitPath(repository, commitId), RepositoryRevisionCodec.Encode(new RepositoryRevision(commitId, files)), cancellationToken)
-            .ConfigureAwait(false);
-        await WriteAtomicallyAsync(BranchPath(repository, branch), Encoding.ASCII.GetBytes(commitId), cancellationToken).ConfigureAwait(false);
-        return commitId;
+    /// <summary>The commit a branch points at, or null when there is no such branch.</summary>
+    private async Task<string?> ReadBranchAsync(RepositoryId repository, string branch, CancellationToken cancellationToken)
+    {
+        var branchPath = BranchPath(repository, branch);
+        return File.Exists(branchPath)
+            ? (await File.ReadAllTextAsync(branchPath, cancellationToken).ConfigureAwait(false)).Trim()
+            : null;
+    }
+
+    private async Task<RepositoryRevision?> ReadCommitAsync(RepositoryId repository, string commitId, CancellationToken cancellationToken)
+    {
+        var commitPath = CommitPath(repository, commitId);
+        return File.Exists(commitPath)
+            ? RepositoryRevisionCodec.Decode(await File.ReadAllBytesAsync(commitPath, cancellationToken).ConfigureAwait(false))
+            : null;
     }
 
     private string XorbPath(MerkleHash hash) => Spread("xorbs", hash);
@@ -159,7 +177,12 @@ public sealed class FileSystemXetStore(string root) : IXetStore, IRepositoryStor
 
     private string FilePath(MerkleHash fileId) => Spread("files", fileId);
 
-    private string Sha256Path(MerkleHash sha256) => Spread("sha256", sha256);
+    /// <summary>Under the repository the file was uploaded to: the SHA-256 is the uploader's claim, so it is theirs alone.</summary>
+    private string Sha256Path(RepositoryId repository, MerkleHash sha256)
+    {
+        var hex = sha256.ToString();
+        return Path.Combine(RepositoryPath(repository), "sha256", hex[..2], hex);
+    }
 
     private string ChunkPath(MerkleHash chunkHash) => Spread("chunks", chunkHash);
 

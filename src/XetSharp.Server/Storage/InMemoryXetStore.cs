@@ -11,7 +11,7 @@ public sealed class InMemoryXetStore : IXetStore, IRepositoryStore
 {
     private readonly ConcurrentDictionary<MerkleHash, (StoredXorb Index, byte[] Bytes)> _xorbs = new();
     private readonly ConcurrentDictionary<MerkleHash, StoredFile> _files = new();
-    private readonly ConcurrentDictionary<MerkleHash, MerkleHash> _filesBySha256 = new();
+    private readonly ConcurrentDictionary<(RepositoryId Repository, MerkleHash Sha256), MerkleHash> _filesBySha256 = new();
     private readonly ConcurrentDictionary<MerkleHash, ChunkLocation> _chunks = new();
     private readonly ConcurrentDictionary<RepositoryId, Repository> _repositories = new();
 
@@ -58,15 +58,15 @@ public sealed class InMemoryXetStore : IXetStore, IRepositoryStore
     public ValueTask<StoredFile?> GetFileAsync(MerkleHash fileId, CancellationToken cancellationToken = default) =>
         ValueTask.FromResult<StoredFile?>(_files.TryGetValue(fileId, out var file) ? file : null);
 
-    public ValueTask<StoredFile?> GetFileBySha256Async(MerkleHash sha256, CancellationToken cancellationToken = default) =>
-        ValueTask.FromResult<StoredFile?>(_filesBySha256.TryGetValue(sha256, out var fileId) && _files.TryGetValue(fileId, out var file) ? file : null);
+    public ValueTask<StoredFile?> GetFileBySha256Async(RepositoryId repository, MerkleHash sha256, CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult<StoredFile?>(_filesBySha256.TryGetValue((repository, sha256), out var fileId) && _files.TryGetValue(fileId, out var file) ? file : null);
 
-    public ValueTask<bool> PutFileAsync(StoredFile file, CancellationToken cancellationToken = default)
+    public ValueTask<bool> PutFileAsync(StoredFile file, RepositoryId repository, CancellationToken cancellationToken = default)
     {
         var inserted = _files.TryAdd(file.FileId, file);
         if (file.Sha256 is { } sha256)
         {
-            _filesBySha256[sha256] = file.FileId;
+            _filesBySha256[(repository, sha256)] = file.FileId;
         }
 
         return ValueTask.FromResult(inserted);
@@ -94,22 +94,14 @@ public sealed class InMemoryXetStore : IXetStore, IRepositoryStore
         var repo = _repositories.GetOrAdd(repository, _ => new Repository());
         lock (repo)
         {
-            var files = repo.Branches.TryGetValue(branch, out var head) && repo.Commits.TryGetValue(head, out var parent)
-                ? new Dictionary<string, RepositoryFile>(parent.Files)
-                : [];
-
-            foreach (var path in commit.Deleted)
+            var head = repo.Branches.GetValueOrDefault(branch);
+            if (commit.ParentCommit is { } parent && head is not null && parent != head)
             {
-                files.Remove(path);
-            }
-
-            foreach (var file in commit.Added)
-            {
-                files[file.Path] = file;
+                throw new BranchMovedException(branch, parent, head);
             }
 
             var commitId = NewCommitId();
-            repo.Commits[commitId] = new RepositoryRevision(commitId, files);
+            repo.Commits[commitId] = new RepositoryRevision(commitId, commit.ApplyTo(head is null ? null : repo.Commits.GetValueOrDefault(head)));
             repo.Branches[branch] = commitId;
             return ValueTask.FromResult(commitId);
         }

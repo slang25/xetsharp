@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using XetSharp.Cas;
 using XetSharp.Chunking;
 using XetSharp.Hashing;
@@ -508,6 +509,39 @@ public class CasApiTests
         late.Headers.TryAddWithoutValidation("Range", Download.XorbRangeFetcher.RangeHeaderFor(fetch));
         using var refused = await host.HttpClient.SendAsync(late);
         await Assert.That(refused.StatusCode).IsEqualTo(HttpStatusCode.Forbidden);
+    }
+
+    [Test]
+    public async Task An_expiry_outside_the_calendar_is_an_invalid_signature_not_a_server_error()
+    {
+        await using var host = await TestXetServer.StartAsync();
+        using var client = host.CreateClient();
+        var upload = await client.UploadAsync(Repository, [XetUploadFile.FromBytes("data.bin", TestData.SplitMix64Bytes(17, 200_000))]);
+        var token = await ReadTokenAsync(host);
+        using var response = await host.HttpClient.SendAsync(Request(HttpMethod.Get, $"/v2/reconstructions/{upload.Files.Single().FileId}", token));
+        var fetch = FileReconstruction.Parse(await response.Content.ReadAsByteArrayAsync()).Xorbs.Single().Value.Single();
+
+        var forever = new HttpRequestMessage(HttpMethod.Get, Regex.Replace(fetch.Url.ToString(), @"Expires=\d+", $"Expires={long.MaxValue}"));
+        forever.Headers.TryAddWithoutValidation("Range", Download.XorbRangeFetcher.RangeHeaderFor(fetch));
+        using var refused = await host.HttpClient.SendAsync(forever);
+        await Assert.That(refused.StatusCode).IsEqualTo(HttpStatusCode.Forbidden);
+    }
+
+    [Test]
+    public async Task A_range_of_an_empty_file_is_unsatisfiable()
+    {
+        await using var host = await TestXetServer.StartAsync();
+        await host.Store.PutFileAsync(new StoredFile(MerkleHash.Zero, 0, null, []), new RepositoryId("model", "acme", "scratch"));
+        var token = await ReadTokenAsync(host);
+
+        var request = Request(HttpMethod.Get, $"/v1/reconstructions/{MerkleHash.Zero}", token);
+        request.Headers.Range = new RangeHeaderValue(0, 0);
+        using var refused = await host.HttpClient.SendAsync(request);
+        await Assert.That(refused.StatusCode).IsEqualTo(HttpStatusCode.RequestedRangeNotSatisfiable);
+
+        // Asked for whole, an empty file reconstructs as nothing at all.
+        using var whole = await host.HttpClient.SendAsync(Request(HttpMethod.Get, $"/v1/reconstructions/{MerkleHash.Zero}", token));
+        await Assert.That(whole.StatusCode).IsEqualTo(HttpStatusCode.OK);
     }
 
     [Test]

@@ -57,6 +57,23 @@ public class FileSystemStoreTests
     }
 
     [Test]
+    public async Task Concurrent_commits_from_the_same_parent_land_exactly_once()
+    {
+        var root = NewRoot();
+        try
+        {
+            var store = new FileSystemXetStore(root);
+            await using var host = await TestXetServer.StartAsync(store, store);
+            using var client = host.CreateClient();
+            await CommitRaces.ExactlyOneLandsAsync(client, Repository);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Test]
     public async Task Xorb_index_codec_round_trips()
     {
         var chunks = Enumerable.Range(0, 5)

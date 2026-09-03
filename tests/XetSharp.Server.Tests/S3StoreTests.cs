@@ -62,6 +62,24 @@ public class S3StoreTests
         // The global index lives in the bucket too.
         var again = await xet.UploadAsync(XetRepository.Model("acme/s3-again"), [XetUploadFile.FromBytes("data.bin", content)]);
         await Assert.That(again.DeduplicatedBytes).IsGreaterThan(0);
+
+        // Branches advance by conditional put, so racing commits settle the same way as anywhere.
+        await CommitRaces.ExactlyOneLandsAsync(xet, Repository);
+    }
+
+    /// <summary>
+    /// Presigning is local, so this needs no S3: the URL must name the Range header among what it
+    /// signs, which is what makes S3 refuse a fetch of any bytes but the ones the URL was made for.
+    /// </summary>
+    [Test]
+    public async Task Presigned_xorb_urls_sign_the_range_header()
+    {
+        using var client = new AmazonS3Client(new BasicAWSCredentials("AKIAEXAMPLE", "secret"), new AmazonS3Config { RegionEndpoint = Amazon.RegionEndpoint.USEast1 });
+        var store = new S3XetStore(client, "bucket");
+
+        var url = await store.CreateDirectDownloadUrlAsync(Hashing.XetHashes.ChunkHash("xorb"u8), 1000, 1999, TimeSpan.FromMinutes(5));
+
+        await Assert.That(Uri.UnescapeDataString(url!.Query)).Contains("X-Amz-SignedHeaders=host;range");
     }
 
     /// <summary>An S3 endpoint and a client for it: Floci in a container, or whatever <c>XETSHARP_S3_ENDPOINT</c> names.</summary>

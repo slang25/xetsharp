@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using XetSharp.Hub;
@@ -155,6 +156,54 @@ public class HubFacadeTests
 
         var exception = await Assert.That(attempt).Throws<XetApiException>();
         await Assert.That(exception!.StatusCode).IsEqualTo(HttpStatusCode.PreconditionFailed);
+    }
+
+    [Test]
+    public async Task Concurrent_commits_from_the_same_parent_land_exactly_once()
+    {
+        await using var host = await TestXetServer.StartAsync();
+        using var client = host.CreateClient();
+        await CommitRaces.ExactlyOneLandsAsync(client, Repository);
+    }
+
+    /// <summary>
+    /// The SHA-256 a shard states for a file is the uploader's word, not something the server
+    /// checks, so it is recorded against the repository the upload's token was for and no other.
+    /// </summary>
+    [Test]
+    public async Task A_sha256_uploaded_to_one_repository_does_not_resolve_in_another()
+    {
+        await using var host = await TestXetServer.StartAsync();
+        using var client = host.CreateClient();
+        var source = XetRepository.Dataset("acme/source");
+        var content = TestData.SplitMix64Bytes(9, 60_000);
+        await client.UploadAsync(source, [XetUploadFile.FromBytes("data.bin", content)]);
+        var pointer = new XetCommitFile("data.bin", Convert.ToHexStringLower(SHA256.HashData(content)), content.Length);
+
+        Func<Task> elsewhere = () => client.CommitAsync(Repository, new XetCommitRequest { Summary = "Borrow", Files = [pointer] });
+        var exception = await Assert.That(elsewhere).Throws<XetApiException>();
+        await Assert.That(exception!.StatusCode).IsEqualTo(HttpStatusCode.BadRequest);
+        await Assert.That(exception.Message).Contains("has not been uploaded");
+
+        await client.CommitAsync(source, new XetCommitRequest { Summary = "Own", Files = [pointer] });
+    }
+
+    [Test]
+    [Arguments("42")]
+    [Arguments("""{"key":42,"value":{}}""")]
+    [Arguments("""{"key":"header","value":"Add"}""")]
+    [Arguments("""{"key":"header","value":{"summary":["Add"]}}""")]
+    [Arguments("""{"key":"deletedFile","value":{}}""")]
+    [Arguments("""{"key":"deletedFile","value":{"path":["a.bin"]}}""")]
+    [Arguments("""{"key":"lfsFile","value":{"path":"a.bin","oid":"abc","size":"12"}}""")]
+    [Arguments("""{"key":"lfsFile","value":{"path":"a.bin","oid":12,"size":12}}""")]
+    [Arguments("""{"key":"file","value":{"path":"a.txt","content":5}}""")]
+    [Arguments("""{"key":"file","value":{"path":"a.txt"}}""")]
+    public async Task Commit_lines_of_the_wrong_shape_are_refused_not_failed_on(string line)
+    {
+        await using var host = await TestXetServer.StartAsync();
+        using var response = await host.HttpClient.PostAsync("/api/datasets/acme/data/commit/main", new StringContent(line, Encoding.UTF8, "application/x-ndjson"));
+        await Assert.That(response.StatusCode).IsEqualTo(HttpStatusCode.BadRequest).Because(await response.Content.ReadAsStringAsync());
     }
 
     /// <summary>

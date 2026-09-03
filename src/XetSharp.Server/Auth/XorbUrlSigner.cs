@@ -33,7 +33,9 @@ internal sealed class XorbUrlSigner(byte[] key, TimeProvider timeProvider)
             return false;
         }
 
-        if (DateTimeOffset.FromUnixTimeSeconds(expiresAt) <= timeProvider.GetUtcNow())
+        // Compared as Unix seconds rather than converted: the value is whatever the query string
+        // says, and a timestamp outside the calendar is an invalid URL, not a server error.
+        if (expiresAt <= timeProvider.GetUtcNow().ToUnixTimeSeconds())
         {
             return false;
         }

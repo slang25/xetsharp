@@ -225,13 +225,20 @@ internal sealed class HubEndpoints(XetServer server)
             throw XetServerException.NotFound($"Repository {repository} does not exist.");
         }
 
-        var commit = await ParseCommitAsync(body, context.RequestAborted).ConfigureAwait(false);
-        if (commit.ParentCommit is { } parent && existing is not null && parent != existing.CommitId)
+        var commit = await ParseCommitAsync(body, repository, context.RequestAborted).ConfigureAwait(false);
+
+        // The store checks the parent and advances the branch as one step; a check here would
+        // let two commits from the same head both pass it.
+        string commitId;
+        try
         {
-            throw new XetServerException(412, $"The branch has moved on from {parent} to {existing.CommitId}.");
+            commitId = await server.Repositories.CommitAsync(repository, branch, commit, context.RequestAborted).ConfigureAwait(false);
+        }
+        catch (BranchMovedException exception)
+        {
+            throw new XetServerException(412, exception.Message);
         }
 
-        var commitId = await server.Repositories.CommitAsync(repository, branch, commit, context.RequestAborted).ConfigureAwait(false);
         server.Logger.Committed(commitId, repository, branch, commit.Added.Count, commit.Deleted.Count);
 
         var baseUrl = server.BaseUrl(context.Request);
@@ -249,9 +256,10 @@ internal sealed class HubEndpoints(XetServer server)
     /// Reads the commit body: newline-delimited JSON, one <c>{ key, value }</c> envelope per line.
     /// <c>lfsFile</c> lines name files by SHA-256 that a shard must already have registered;
     /// <c>file</c> lines carry small files inline, which are chunked and stored here so that
-    /// they are Xet files like everything else.
+    /// they are Xet files like everything else. Anything not the shape it should be is a 400,
+    /// whether the JSON will not parse or a property has the wrong type.
     /// </summary>
-    private async Task<RepositoryCommit> ParseCommitAsync(byte[] body, CancellationToken cancellationToken)
+    private async Task<RepositoryCommit> ParseCommitAsync(byte[] body, RepositoryId repository, CancellationToken cancellationToken)
     {
         var summary = string.Empty;
         string? description = null;
@@ -279,30 +287,35 @@ internal sealed class HubEndpoints(XetServer server)
             using (document)
             {
                 var root = document.RootElement;
-                var key = root.TryGetProperty("key", out var keyElement) ? keyElement.GetString() : null;
-                if (!root.TryGetProperty("value", out var value))
+                if (root.ValueKind != JsonValueKind.Object)
                 {
-                    throw XetServerException.BadRequest($"A '{key}' line has no value.");
+                    throw XetServerException.BadRequest("Each commit line must be a { \"key\", \"value\" } object.");
+                }
+
+                var key = OptionalString(root, "key", "commit");
+                if (!root.TryGetProperty("value", out var value) || value.ValueKind != JsonValueKind.Object)
+                {
+                    throw XetServerException.BadRequest($"A '{key}' line has no value object.");
                 }
 
                 switch (key)
                 {
                     case "header":
-                        summary = value.TryGetProperty("summary", out var s) ? s.GetString() ?? string.Empty : string.Empty;
-                        description = value.TryGetProperty("description", out var d) ? d.GetString() : null;
-                        parentCommit = value.TryGetProperty("parentCommit", out var p) ? p.GetString() : null;
+                        summary = OptionalString(value, "summary", key) ?? string.Empty;
+                        description = OptionalString(value, "description", key);
+                        parentCommit = OptionalString(value, "parentCommit", key);
                         break;
 
                     case "lfsFile":
-                        added.Add(await LfsFileAsync(value, cancellationToken).ConfigureAwait(false));
+                        added.Add(await LfsFileAsync(value, repository, cancellationToken).ConfigureAwait(false));
                         break;
 
                     case "file":
-                        added.Add(await InlineFileAsync(value, cancellationToken).ConfigureAwait(false));
+                        added.Add(await InlineFileAsync(value, repository, cancellationToken).ConfigureAwait(false));
                         break;
 
                     case "deletedFile":
-                        deleted.Add(value.GetProperty("path").GetString() ?? throw XetServerException.BadRequest("A deletedFile line has no path."));
+                        deleted.Add(RequiredString(value, "path", key));
                         break;
 
                     default:
@@ -319,12 +332,12 @@ internal sealed class HubEndpoints(XetServer server)
         return new RepositoryCommit(summary, description, added, deleted, parentCommit);
     }
 
-    private async Task<RepositoryFile> LfsFileAsync(JsonElement value, CancellationToken cancellationToken)
+    private async Task<RepositoryFile> LfsFileAsync(JsonElement value, RepositoryId repository, CancellationToken cancellationToken)
     {
-        var path = value.GetProperty("path").GetString() ?? throw XetServerException.BadRequest("An lfsFile line has no path.");
-        var oid = value.GetProperty("oid").GetString();
-        var size = value.GetProperty("size").GetInt64();
-        if (value.TryGetProperty("algo", out var algo) && algo.GetString() is { } algorithm && algorithm != "sha256")
+        var path = RequiredString(value, "path", "lfsFile");
+        var oid = RequiredString(value, "oid", "lfsFile");
+        var size = RequiredInt64(value, "size", "lfsFile");
+        if (OptionalString(value, "algo", "lfsFile") is { } algorithm && algorithm != "sha256")
         {
             throw XetServerException.BadRequest($"'{path}' names its content by {algorithm}; only sha256 is supported.");
         }
@@ -334,8 +347,8 @@ internal sealed class HubEndpoints(XetServer server)
             throw XetServerException.BadRequest($"'{path}' has an oid that is not a SHA-256: '{oid}'.");
         }
 
-        var file = await server.Store.GetFileBySha256Async(sha256, cancellationToken).ConfigureAwait(false)
-            ?? throw XetServerException.BadRequest($"'{path}' (sha256 {oid}) has not been uploaded: no registered file has that SHA-256.");
+        var file = await server.Store.GetFileBySha256Async(repository, sha256, cancellationToken).ConfigureAwait(false)
+            ?? throw XetServerException.BadRequest($"'{path}' (sha256 {oid}) has not been uploaded to {repository}: no file registered there has that SHA-256.");
         if (file.Size != size)
         {
             throw XetServerException.BadRequest($"'{path}' is declared as {size} bytes but the uploaded file is {file.Size}.");
@@ -348,11 +361,11 @@ internal sealed class HubEndpoints(XetServer server)
     /// An inline file becomes a xorb and a registered file, through the same chunker and packer
     /// a client uses, so a download of it goes through exactly the same path as anything else.
     /// </summary>
-    private async Task<RepositoryFile> InlineFileAsync(JsonElement value, CancellationToken cancellationToken)
+    private async Task<RepositoryFile> InlineFileAsync(JsonElement value, RepositoryId repository, CancellationToken cancellationToken)
     {
-        var path = value.GetProperty("path").GetString() ?? throw XetServerException.BadRequest("A file line has no path.");
-        var encoding = value.TryGetProperty("encoding", out var e) ? e.GetString() : "utf-8";
-        var content = value.GetProperty("content").GetString() ?? string.Empty;
+        var path = RequiredString(value, "path", "file");
+        var encoding = OptionalString(value, "encoding", "file") ?? "utf-8";
+        var content = RequiredString(value, "content", "file");
         byte[] bytes;
         try
         {
@@ -367,7 +380,7 @@ internal sealed class HubEndpoints(XetServer server)
         if (bytes.Length == 0)
         {
             var empty = new StoredFile(MerkleHash.Zero, 0, sha256, []);
-            await server.Store.PutFileAsync(empty, cancellationToken).ConfigureAwait(false);
+            await server.Store.PutFileAsync(empty, repository, cancellationToken).ConfigureAwait(false);
             return new RepositoryFile(path, empty.FileId, 0, sha256.ToString());
         }
 
@@ -385,9 +398,31 @@ internal sealed class HubEndpoints(XetServer server)
             bytes.Length,
             sha256,
             [new StoredTerm(xorbHash, 0, chunks.Count, bytes.Length)]);
-        await server.Store.PutFileAsync(file, cancellationToken).ConfigureAwait(false);
+        await server.Store.PutFileAsync(file, repository, cancellationToken).ConfigureAwait(false);
         return new RepositoryFile(path, file.FileId, file.Size, sha256.ToString());
     }
+
+    /// <summary>A string property a commit line must carry, or a 400 saying which line lacks what.</summary>
+    private static string RequiredString(JsonElement element, string name, string? line) =>
+        OptionalString(element, name, line) ?? throw XetServerException.BadRequest($"A '{line}' line has no '{name}'.");
+
+    /// <summary>A string property a commit line may carry: null when absent or null, a 400 when it is some other type.</summary>
+    private static string? OptionalString(JsonElement element, string name, string? line)
+    {
+        if (!element.TryGetProperty(name, out var property) || property.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        return property.ValueKind == JsonValueKind.String
+            ? property.GetString()
+            : throw XetServerException.BadRequest($"A '{line}' line has a '{name}' that is not a string.");
+    }
+
+    private static long RequiredInt64(JsonElement element, string name, string? line) =>
+        element.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.Number && property.TryGetInt64(out var value)
+            ? value
+            : throw XetServerException.BadRequest($"A '{line}' line has no integer '{name}'.");
 
     private async Task RepositoryInfoAsync(HttpContext context)
     {

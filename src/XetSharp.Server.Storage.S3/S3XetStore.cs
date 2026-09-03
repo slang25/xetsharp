@@ -12,6 +12,11 @@ namespace XetSharp.Server.Storage.S3;
 /// </summary>
 public sealed class S3XetStore(IAmazonS3 client, string bucket, string prefix = "") : IXetStore, IRepositoryStore
 {
+    /// <summary>How many times a commit that names no parent is rebuilt on a head that moved under it.</summary>
+    private const int MaxCommitAttempts = 5;
+
+    private const string RangeHeader = "Range";
+
     private readonly string _prefix = prefix.Length == 0 ? string.Empty : prefix.TrimEnd('/') + "/";
 
     public async ValueTask<StoredXorb?> GetXorbAsync(MerkleHash hash, CancellationToken cancellationToken = default)
@@ -27,9 +32,10 @@ public sealed class S3XetStore(IAmazonS3 client, string bucket, string prefix = 
             return false;
         }
 
+        // Bytes and chunk entries first, index last: the index is what says a xorb exists, so a
+        // failure before it leaves orphans a retry completes, rather than a xorb that looks whole
+        // but is missing from the global-deduplication index for good.
         await PutAsync(XorbKey(xorb.Hash), serialized, cancellationToken).ConfigureAwait(false);
-        await PutAsync(IndexKey(xorb.Hash), StoredXorbCodec.Encode(xorb), cancellationToken).ConfigureAwait(false);
-
         for (var i = 0; i < xorb.Chunks.Length; i++)
         {
             var chunk = xorb.Chunks[i].Hash;
@@ -39,6 +45,7 @@ public sealed class S3XetStore(IAmazonS3 client, string bucket, string prefix = 
             }
         }
 
+        await PutAsync(IndexKey(xorb.Hash), StoredXorbCodec.Encode(xorb), cancellationToken).ConfigureAwait(false);
         return true;
     }
 
@@ -52,7 +59,7 @@ public sealed class S3XetStore(IAmazonS3 client, string bucket, string prefix = 
 
     public async ValueTask<Uri?> CreateDirectDownloadUrlAsync(MerkleHash hash, long start, long end, TimeSpan lifetime, CancellationToken cancellationToken = default)
     {
-        var url = await client.GetPreSignedURLAsync(new GetPreSignedUrlRequest
+        var request = new GetPreSignedUrlRequest
         {
             BucketName = bucket,
             Key = XorbKey(hash),
@@ -61,8 +68,13 @@ public sealed class S3XetStore(IAmazonS3 client, string bucket, string prefix = 
             // The presigner assumes HTTPS whatever the client was configured with; a local
             // emulator on plain HTTP would otherwise get URLs nothing can fetch.
             Protocol = UsesPlainHttp(client.Config) ? Protocol.HTTP : Protocol.HTTPS,
-        }).ConfigureAwait(false);
-        return new Uri(url);
+        };
+
+        // The Range header is part of what is signed, so the URL fetches these bytes and no
+        // others: S3 refuses a request that omits the header or sends a different value. That is
+        // the rule the spec sets for signed xorb URLs, and a xorb holds other files' chunks too.
+        request.Headers[RangeHeader] = $"bytes={start}-{end}";
+        return new Uri(await client.GetPreSignedURLAsync(request).ConfigureAwait(false));
     }
 
     public async ValueTask<StoredFile?> GetFileAsync(MerkleHash fileId, CancellationToken cancellationToken = default)
@@ -71,21 +83,21 @@ public sealed class S3XetStore(IAmazonS3 client, string bucket, string prefix = 
         return bytes is null ? null : StoredFileCodec.Decode(bytes);
     }
 
-    public async ValueTask<StoredFile?> GetFileBySha256Async(MerkleHash sha256, CancellationToken cancellationToken = default)
+    public async ValueTask<StoredFile?> GetFileBySha256Async(RepositoryId repository, MerkleHash sha256, CancellationToken cancellationToken = default)
     {
-        var bytes = await GetAsync(Sha256Key(sha256), cancellationToken).ConfigureAwait(false);
+        var bytes = await GetAsync(Sha256Key(repository, sha256), cancellationToken).ConfigureAwait(false);
         return bytes is null
             ? null
             : await GetFileAsync(MerkleHash.Parse(Encoding.ASCII.GetString(bytes).Trim()), cancellationToken).ConfigureAwait(false);
     }
 
-    public async ValueTask<bool> PutFileAsync(StoredFile file, CancellationToken cancellationToken = default)
+    public async ValueTask<bool> PutFileAsync(StoredFile file, RepositoryId repository, CancellationToken cancellationToken = default)
     {
         var existed = await ExistsAsync(FileKey(file.FileId), cancellationToken).ConfigureAwait(false);
         await PutAsync(FileKey(file.FileId), StoredFileCodec.Encode(file), cancellationToken).ConfigureAwait(false);
         if (file.Sha256 is { } sha256)
         {
-            await PutAsync(Sha256Key(sha256), Encoding.ASCII.GetBytes(file.FileId.ToString()), cancellationToken).ConfigureAwait(false);
+            await PutAsync(Sha256Key(repository, sha256), Encoding.ASCII.GetBytes(file.FileId.ToString()), cancellationToken).ConfigureAwait(false);
         }
 
         return !existed;
@@ -105,34 +117,81 @@ public sealed class S3XetStore(IAmazonS3 client, string bucket, string prefix = 
 
     public async ValueTask<RepositoryRevision?> GetRevisionAsync(RepositoryId repository, string revision, CancellationToken cancellationToken = default)
     {
-        var commitId = revision;
-        if (await GetAsync(BranchKey(repository, revision), cancellationToken).ConfigureAwait(false) is { } head)
-        {
-            commitId = Encoding.ASCII.GetString(head).Trim();
-        }
-
-        var bytes = await GetAsync(CommitKey(repository, commitId), cancellationToken).ConfigureAwait(false);
-        return bytes is null ? null : RepositoryRevisionCodec.Decode(bytes);
+        var (head, _) = await ReadBranchAsync(repository, revision, cancellationToken).ConfigureAwait(false);
+        return await ReadCommitAsync(repository, head ?? revision, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<string> CommitAsync(RepositoryId repository, string branch, RepositoryCommit commit, CancellationToken cancellationToken = default)
     {
-        var parent = await GetRevisionAsync(repository, branch, cancellationToken).ConfigureAwait(false);
-        var files = parent is null ? [] : new Dictionary<string, RepositoryFile>(parent.Files);
-        foreach (var path in commit.Deleted)
+        // The branch pointer is advanced by a conditional put on the ETag it was read at, so two
+        // commits from the same head cannot both land, whichever instances are serving them. A
+        // commit that names its parent and loses the race is a conflict; one that does not is
+        // rebuilt on the new head and tried again.
+        for (var attempt = 1; ; attempt++)
         {
-            files.Remove(path);
-        }
+            var (head, etag) = await ReadBranchAsync(repository, branch, cancellationToken).ConfigureAwait(false);
+            if (commit.ParentCommit is { } parent && head is not null && parent != head)
+            {
+                throw new BranchMovedException(branch, parent, head);
+            }
 
-        foreach (var file in commit.Added)
+            var parentRevision = head is null ? null : await ReadCommitAsync(repository, head, cancellationToken).ConfigureAwait(false);
+            var commitId = InMemoryXetStore.NewCommitId();
+            await PutAsync(
+                CommitKey(repository, commitId),
+                RepositoryRevisionCodec.Encode(new RepositoryRevision(commitId, commit.ApplyTo(parentRevision))),
+                cancellationToken).ConfigureAwait(false);
+
+            var advance = new PutObjectRequest { BucketName = bucket, Key = BranchKey(repository, branch), ContentBody = commitId };
+            if (etag is null)
+            {
+                advance.IfNoneMatch = "*";
+            }
+            else
+            {
+                advance.IfMatch = etag;
+            }
+
+            try
+            {
+                await client.PutObjectAsync(advance, cancellationToken).ConfigureAwait(false);
+                return commitId;
+            }
+            catch (AmazonS3Exception exception) when (exception.StatusCode is HttpStatusCode.PreconditionFailed or HttpStatusCode.Conflict)
+            {
+                if (commit.ParentCommit is { } stated)
+                {
+                    var (moved, _) = await ReadBranchAsync(repository, branch, cancellationToken).ConfigureAwait(false);
+                    throw new BranchMovedException(branch, stated, moved);
+                }
+
+                if (attempt == MaxCommitAttempts)
+                {
+                    throw;
+                }
+            }
+        }
+    }
+
+    /// <summary>The commit a branch points at and the ETag of the pointer, or nulls when there is no such branch.</summary>
+    private async Task<(string? CommitId, string? ETag)> ReadBranchAsync(RepositoryId repository, string branch, CancellationToken cancellationToken)
+    {
+        try
         {
-            files[file.Path] = file;
+            using var response = await client.GetObjectAsync(bucket, BranchKey(repository, branch), cancellationToken).ConfigureAwait(false);
+            using var reader = new StreamReader(response.ResponseStream, Encoding.ASCII);
+            return ((await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false)).Trim(), response.ETag);
         }
+        catch (AmazonS3Exception exception) when (exception.StatusCode == HttpStatusCode.NotFound)
+        {
+            return (null, null);
+        }
+    }
 
-        var commitId = InMemoryXetStore.NewCommitId();
-        await PutAsync(CommitKey(repository, commitId), RepositoryRevisionCodec.Encode(new RepositoryRevision(commitId, files)), cancellationToken).ConfigureAwait(false);
-        await PutAsync(BranchKey(repository, branch), Encoding.ASCII.GetBytes(commitId), cancellationToken).ConfigureAwait(false);
-        return commitId;
+    private async Task<RepositoryRevision?> ReadCommitAsync(RepositoryId repository, string commitId, CancellationToken cancellationToken)
+    {
+        var bytes = await GetAsync(CommitKey(repository, commitId), cancellationToken).ConfigureAwait(false);
+        return bytes is null ? null : RepositoryRevisionCodec.Decode(bytes);
     }
 
     private static bool UsesPlainHttp(Amazon.Runtime.IClientConfig config) =>
@@ -145,7 +204,12 @@ public sealed class S3XetStore(IAmazonS3 client, string bucket, string prefix = 
 
     private string FileKey(MerkleHash fileId) => Spread("files", fileId);
 
-    private string Sha256Key(MerkleHash sha256) => Spread("sha256", sha256);
+    /// <summary>Under the repository the file was uploaded to: the SHA-256 is the uploader's claim, so it is theirs alone.</summary>
+    private string Sha256Key(RepositoryId repository, MerkleHash sha256)
+    {
+        var hex = sha256.ToString();
+        return $"{RepositoryKey(repository)}/sha256/{hex[..2]}/{hex}";
+    }
 
     private string ChunkKey(MerkleHash chunkHash) => Spread("chunks", chunkHash);
 

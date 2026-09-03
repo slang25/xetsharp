@@ -20,6 +20,10 @@ public sealed record ShardRegistration(int FileCount, int NewFileCount)
 /// </summary>
 internal sealed class ShardRegistrar(IXetStore store)
 {
+    /// <param name="repository">
+    /// The repository the uploader's token is for, which the files' SHA-256 claims are recorded
+    /// against: the one claim in a shard the server cannot check, so it reaches no further.
+    /// </param>
     /// <param name="progress">
     /// Told (verified, total) chunk counts as validation goes, which is what the streaming upload
     /// endpoint reports to its client.
@@ -27,6 +31,7 @@ internal sealed class ShardRegistrar(IXetStore store)
     /// <exception cref="XetServerException">The shard is malformed, names a xorb that is not stored, or lies about one.</exception>
     public async Task<ShardRegistration> RegisterAsync(
         ReadOnlyMemory<byte> serialized,
+        RepositoryId repository,
         Func<long, long, ValueTask>? progress,
         CancellationToken cancellationToken)
     {
@@ -70,7 +75,7 @@ internal sealed class ShardRegistrar(IXetStore store)
         var newFiles = 0;
         foreach (var file in files)
         {
-            if (await store.PutFileAsync(file, cancellationToken).ConfigureAwait(false))
+            if (await store.PutFileAsync(file, repository, cancellationToken).ConfigureAwait(false))
             {
                 newFiles++;
             }

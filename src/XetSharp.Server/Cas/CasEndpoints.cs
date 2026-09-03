@@ -239,9 +239,9 @@ internal sealed class CasEndpoints(XetServer server)
 
     private async Task UploadShardAsync(HttpContext context)
     {
-        Authorize(context, XetTokenScope.Write);
+        var claims = Authorize(context, XetTokenScope.Write);
         var body = await Responses.ReadBodyAsync(context, MdbShard.MaxUploadSize).ConfigureAwait(false);
-        var registration = await server.Registrar.RegisterAsync(body, null, context.RequestAborted).ConfigureAwait(false);
+        var registration = await server.Registrar.RegisterAsync(body, claims.Repository, null, context.RequestAborted).ConfigureAwait(false);
         server.Logger.ShardRegistered(registration.FileCount, registration.NewFileCount);
 
         await Responses.JsonAsync(context, writer =>
@@ -259,7 +259,7 @@ internal sealed class CasEndpoints(XetServer server)
     /// </summary>
     private async Task UploadShardStreamingAsync(HttpContext context)
     {
-        Authorize(context, XetTokenScope.Write);
+        var claims = Authorize(context, XetTokenScope.Write);
         var body = await Responses.ReadBodyAsync(context, MdbShard.MaxUploadSize).ConfigureAwait(false);
 
         context.Response.StatusCode = 200;
@@ -271,6 +271,7 @@ internal sealed class CasEndpoints(XetServer server)
         {
             var registration = await server.Registrar.RegisterAsync(
                 body,
+                claims.Repository,
                 (verified, total) => EventAsync(context, $$"""{"type":"validating","verified":{{verified}},"total":{{total}}}"""),
                 context.RequestAborted).ConfigureAwait(false);
 

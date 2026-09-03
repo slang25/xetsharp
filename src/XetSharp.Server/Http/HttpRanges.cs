@@ -6,7 +6,8 @@ internal static class HttpRanges
     /// <summary>
     /// Parses a single-range <c>Range</c> header of the form the reconstruction endpoints accept:
     /// <c>bytes=start-end</c>, or <c>bytes=start-</c> for "to the end". Null for no header;
-    /// throws 400 for anything else, and 416 for a start past <paramref name="length"/>.
+    /// throws 400 for anything else, and 416 for a start past <paramref name="length"/> — which
+    /// is every range when the file is empty, since no byte of it exists to serve.
     /// </summary>
     public static (long Start, long End)? ParseSingle(string? header, long length)
     {
@@ -21,7 +22,7 @@ internal static class HttpRanges
         }
 
         var (start, end) = ParseSpec(header.AsSpan("bytes=".Length), length);
-        if (start >= length && length > 0)
+        if (start >= length)
         {
             throw new XetServerException(416, $"The range starts at byte {start}, past the end of the {length}-byte file.");
         }

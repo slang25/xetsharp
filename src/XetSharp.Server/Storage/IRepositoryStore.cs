@@ -15,9 +15,25 @@ public interface IRepositoryStore
 
     /// <summary>
     /// Applies a commit to a branch, creating the repository and the branch when they do not yet
-    /// exist, and returns the new commit ID.
+    /// exist, and returns the new commit ID. When the commit names a parent and the branch exists
+    /// at some other commit, nothing changes and <see cref="BranchMovedException"/> is thrown. The
+    /// check and the advance are one atomic step, so two commits from the same parent cannot both
+    /// land.
     /// </summary>
     ValueTask<string> CommitAsync(RepositoryId repository, string branch, RepositoryCommit commit, CancellationToken cancellationToken = default);
+}
+
+/// <summary>A commit named a parent that is no longer the branch's head: another commit landed first.</summary>
+public sealed class BranchMovedException(string branch, string parent, string? head)
+    : Exception($"The branch '{branch}' has moved on from {parent}{(head is null ? string.Empty : $" to {head}")}.")
+{
+    public string Branch { get; } = branch;
+
+    /// <summary>The parent the commit named.</summary>
+    public string Parent { get; } = parent;
+
+    /// <summary>Where the branch was found to be instead, when known.</summary>
+    public string? Head { get; } = head;
 }
 
 /// <summary>A repository on the Hub facade: <c>models/openai-community/gpt2</c> and the like.</summary>
@@ -44,4 +60,22 @@ public sealed record RepositoryCommit(
     string? Description,
     IReadOnlyList<RepositoryFile> Added,
     IReadOnlyList<string> Deleted,
-    string? ParentCommit);
+    string? ParentCommit)
+{
+    /// <summary>The files a revision holds once this commit is applied to <paramref name="parent"/>.</summary>
+    public Dictionary<string, RepositoryFile> ApplyTo(RepositoryRevision? parent)
+    {
+        var files = parent is null ? [] : new Dictionary<string, RepositoryFile>(parent.Files);
+        foreach (var path in Deleted)
+        {
+            files.Remove(path);
+        }
+
+        foreach (var file in Added)
+        {
+            files[file.Path] = file;
+        }
+
+        return files;
+    }
+}
